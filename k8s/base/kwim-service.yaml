@@ -1,0 +1,118 @@
+---
+# KWIM service - the contract teams call (K/W/M API + governance gate).
+# Stateless, not node-pinned (spreads across nodes; backends are reached over
+# the network). Secrets arrive as mounted files (projected Secret volume); the
+# start command assembles the backend URLs from them - keeps creds out of the
+# image and out of plain env in the manifest.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kwim-service
+  namespace: kwim
+  labels:
+    app: kwim-service
+    app.kubernetes.io/name: kwim-service
+    app.kubernetes.io/part-of: kwim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kwim-service
+  template:
+    metadata:
+      labels:
+        app: kwim-service
+        app.kubernetes.io/name: kwim-service
+        app.kubernetes.io/part-of: kwim
+    spec:
+      serviceAccountName: kwim-service
+      # If your registry is private, add an imagePullSecrets entry (here or via an
+      # overlay) referencing a pull Secret you create in this namespace.
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret: { name: kwim-db,        items: [{ key: value, path: db-password }] }
+              - secret: { name: kwim-rabbitmq,  items: [{ key: value, path: rabbitmq-password }] }
+              - secret: { name: kwim-falkordb,  items: [{ key: value, path: falkordb-password }] }
+              - secret: { name: kwim-api-keys,  items: [{ key: value, path: api-keys }] }
+              # Capability allowlist (key-id prefixes for promote/seed/review).
+              # Optional so the pod starts before the operator provisions it; until
+              # then promote/seed/review fail-closed (403) by design.
+              - secret: { name: kwim-promote-keys, items: [{ key: value, path: promote-keys }], optional: true }
+              # Mattermost review-surface secrets - operator-provisioned
+              # later; optional so the pod starts before they exist.
+              - secret: { name: kwim-mm-webhook-url,    items: [{ key: value, path: mm-webhook-url }],    optional: true }
+              - secret: { name: kwim-mm-action-secret,  items: [{ key: value, path: mm-action-secret }],  optional: true }
+      containers:
+        - name: kwim-service
+          # Bare image name; set your registry + tag via the kustomize `images:`
+          # transformer in your overlay.
+          image: kwim-service:latest
+          command:
+            - /app/with-secrets.sh
+            - uvicorn
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          # Backend endpoints. Defaults assume the backends run as same-namespace
+          # Services named postgresql/falkordb/rabbitmq/embedder; override the hosts
+          # in your overlay for cross-namespace or external backends.
+          env:
+            - { name: KWIM_PG_HOST,     value: "postgresql" }
+            - { name: KWIM_PG_PORT,     value: "5432" }
+            - { name: KWIM_PG_DB,       value: "kwim" }
+            - { name: KWIM_PG_USER,     value: "kwim_user" }
+            - { name: KWIM_FALKOR_HOST, value: "falkordb" }
+            - { name: KWIM_FALKOR_PORT, value: "6379" }
+            - { name: KWIM_RMQ_HOST,    value: "rabbitmq" }
+            - { name: KWIM_RMQ_PORT,    value: "5672" }
+            - { name: KWIM_RMQ_USER,    value: "kwim" }
+            - { name: KWIM_RMQ_VHOST,   value: "/kwim" }
+            - { name: KWIM_EMBEDDER_URL, value: "http://embedder:80" }
+            # KWIM_PROMOTE_KEYS / KWIM_REVIEW_KEYS are exported by with-secrets.sh
+            # from the mounted /secrets/promote-keys file - never hardcoded here.
+            - { name: KWIM_SERVICE_URL, value: "http://kwim-service:8000" }
+            # Trace propagation - fail-soft no-op if the collector isn't reachable.
+            # Unset by default; set the OTLP endpoint in your overlay to enable.
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "" }
+            - { name: OTEL_SERVICE_NAME, value: "kwim-service" }
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kwim-service
+  namespace: kwim
+  labels:
+    app: kwim-service
+    app.kubernetes.io/name: kwim-service
+    app.kubernetes.io/part-of: kwim
+spec:
+  type: ClusterIP
+  selector:
+    app: kwim-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

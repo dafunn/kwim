@@ -1,0 +1,134 @@
+---
+# FalkorDB - KWIM Knowledge layer (graph store).
+#
+# Speaks the Redis protocol on :6379. Per-tenant isolation is by graph name
+# (e.g. kwim_<team>_knowledge), so a single instance serves all teams.
+#
+# Stateful, single-primary. If your storage class is node-bound,
+# the pod pins to one node - recovery is manual.
+#
+# AUTH: requirepass is set from the `falkordb-auth` Secret (provide it via your
+# secret manager). The Service is also ClusterIP-only.
+# Still open: a NetworkPolicy restricting ingress to KWIM.
+#
+# PERSISTENCE: AOF (appendonly) on the local-path PVC at /var/lib/falkordb/data
+# (the image's data dir). No maxmemory eviction policy - a Knowledge store must
+# never silently evict facts; default `noeviction` errors instead.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falkordb
+  namespace: kwim
+  labels:
+    app: falkordb
+    app.kubernetes.io/name: falkordb
+    app.kubernetes.io/part-of: kwim
+spec:
+  serviceName: falkordb-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: falkordb
+  template:
+    metadata:
+      labels:
+        app: falkordb
+        app.kubernetes.io/name: falkordb
+        app.kubernetes.io/part-of: kwim
+    spec:
+      # Stateful single-primary. If your storage class is node-bound,
+      # pin this to a node with a nodeSelector in your overlay.
+      serviceAccountName: falkordb
+      enableServiceLinks: false
+      containers:
+        - name: falkordb
+          image: falkordb/falkordb:v4.18.9
+          env:
+            # Password from the falkordb-auth Secret; referenced by REDIS_ARGS below.
+            - name: FALKORDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: falkordb-auth
+                  key: value
+            # k8s expands $(FALKORDB_PASSWORD) because it's declared earlier.
+            # AOF persistence on; no eviction policy (see header).
+            - name: REDIS_ARGS
+              value: "--requirepass $(FALKORDB_PASSWORD) --appendonly yes --appendfsync everysec"
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/falkordb/data
+          resources:
+            requests:
+              # Raised from 256Mi/1Gi: FalkorDB is in-memory and now also holds the
+              # per-team code graph (kwim_<team>_code - nodes/edges + 384-d function
+              # embeddings), which is larger than the K/W store. Sized from measuring
+              # KWIM's own repo (~360 functions/2.3k edges ~= low-MB per repo); raise
+              # further as more/larger repos are indexed.
+              memory: "512Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi
+---
+# Headless service backing the StatefulSet (stable pod DNS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: falkordb-headless
+  namespace: kwim
+  labels:
+    app: falkordb
+    app.kubernetes.io/name: falkordb
+    app.kubernetes.io/part-of: kwim
+spec:
+  clusterIP: None
+  selector:
+    app: falkordb
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Stable in-cluster endpoint KWIM components connect to (short name resolves
+# within the namespace; use the FQDN across namespaces): redis://falkordb:6379
+apiVersion: v1
+kind: Service
+metadata:
+  name: falkordb
+  namespace: kwim
+  labels:
+    app: falkordb
+    app.kubernetes.io/name: falkordb
+    app.kubernetes.io/part-of: kwim
+spec:
+  type: ClusterIP
+  selector:
+    app: falkordb
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379

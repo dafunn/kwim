@@ -1,0 +1,8 @@
+# Test-only deps for the distiller unit tests. The tests stub otel / llm_router /
+# langchain, so the only real runtime dep they need is httpx (for the KWIM client).
+# Install: <venv>/bin/python -m pip install -r requirements-dev.txt
+httpx==0.28.1
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0

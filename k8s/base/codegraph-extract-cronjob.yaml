@@ -1,0 +1,166 @@
+---
+# Code graph (+T) extractor - periodically indexes allow-listed repos into each
+# team's kwim_<team>_code graph, then distills structural facts through the gate.
+#
+# Pipeline per run: initContainer clones/fetches the repos into a cache PVC, then
+# the main container runs `app.codegraph.extract` + `app.codegraph.distill` for
+# each (team, repo). Reuses the kwim-service image (it ships app/codegraph) and the
+# kwim-service secret projection (db/rabbitmq/falkordb passwords via with-secrets.sh).
+#
+# The cache PVC is the extractor's own, it cannot share another RWO volume.
+# Incremental: xxh3 content hashing re-extracts only changed files across runs.
+#
+# Operator prereqs:
+#   - a read-only git token in a Secret named kwim-codegraph-git-token (key: value),
+#     provided via your secret manager.
+#   - the repo allow-list + team in the ConfigMap below.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kwim-codegraph-cache
+  namespace: kwim
+  labels:
+    app: kwim-codegraph
+    app.kubernetes.io/part-of: kwim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Which team + repos to index. Edit to add repos; keep names matching the `repo`
+# property used in queries/warm-start. REPOS is space-separated "<name>=<git-path>".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kwim-codegraph-config
+  namespace: kwim
+  labels:
+    app: kwim-codegraph
+    app.kubernetes.io/part-of: kwim
+data:
+  # "<repo-node-name>=<owner/repo>[@<branch>]" pairs, space-separated. The node-name
+  # on the left is also the KWIM team the repo distills into - each repo gets its own
+  # kwim_<name>_code graph and proposes architecture facts into its own team's K/W.
+  # Append @<branch> to clone a non-default branch; omit for the default branch.
+  REPOS: "team-a=example-org/repo-a team-b=example-org/repo-b"
+  # Host of your git server (used to build the clone URL below). Works with any
+  # gitea/github-compatible host that accepts an oauth2 token.
+  GIT_BASE: "git.example.com"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kwim-codegraph-extract
+  namespace: kwim
+  labels:
+    app: kwim-codegraph
+    app.kubernetes.io/part-of: kwim
+spec:
+  schedule: "30 5 * * *"
+  concurrencyPolicy: Forbid     # a run holds the RWO cache PVC; never overlap
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: kwim-codegraph
+            app.kubernetes.io/part-of: kwim
+        spec:
+          serviceAccountName: kwim-service
+          restartPolicy: Never
+          # Add imagePullSecrets here (or via an overlay) if your registry is private.
+          volumes:
+            - name: cache
+              persistentVolumeClaim:
+                claimName: kwim-codegraph-cache
+            - name: git-token
+              secret:
+                secretName: kwim-codegraph-git-token
+            # Same secret projection as kwim-service so with-secrets.sh can export
+            # KWIM_FALKOR_PASSWORD / KWIM_RMQ_PASSWORD (FalkorDB + bus access).
+            - name: secrets
+              projected:
+                sources:
+                  - secret: { name: kwim-falkordb, items: [{ key: value, path: falkordb-password }] }
+                  - secret: { name: kwim-rabbitmq, items: [{ key: value, path: rabbitmq-password }] }
+                  - secret: { name: kwim-db,        items: [{ key: value, path: db-password }] }
+                  - secret: { name: kwim-api-keys,  items: [{ key: value, path: api-keys }] }
+          initContainers:
+            # Clone-or-fetch each allow-listed repo into the cache PVC (read-only token).
+            - name: fetch-repos
+              image: alpine/git:latest
+              envFrom:
+                - configMapRef: { name: kwim-codegraph-config }
+              env:
+                - name: GIT_TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: kwim-codegraph-git-token, key: value }
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  for pair in $REPOS; do
+                    name="${pair%%=*}"; spec="${pair#*=}"
+                    # spec is "<owner/repo>" or "<owner/repo>@<branch>"
+                    repo="${spec%@*}"; branch=""
+                    case "$spec" in *@*) branch="${spec##*@}";; esac
+                    url="https://oauth2:${GIT_TOKEN}@${GIT_BASE}/${repo}.git"
+                    dir="/cache/${name}"
+                    if [ -d "$dir/.git" ]; then
+                      git -C "$dir" remote set-url origin "$url"
+                      if [ -n "$branch" ]; then
+                        git -C "$dir" fetch --depth 1 origin "$branch" && git -C "$dir" reset --hard FETCH_HEAD
+                      else
+                        git -C "$dir" fetch --depth 1 origin && git -C "$dir" reset --hard origin/HEAD
+                      fi
+                    else
+                      if [ -n "$branch" ]; then
+                        git clone --depth 1 --branch "$branch" "$url" "$dir"
+                      else
+                        git clone --depth 1 "$url" "$dir"
+                      fi
+                    fi
+                    echo "fetched $name -> $dir branch=${branch:-default} ($(git -C "$dir" rev-parse --short HEAD))"
+                  done
+              volumeMounts:
+                - { name: cache, mountPath: /cache }
+          containers:
+            - name: extract
+              # Reuses the kwim-service image; set registry + tag via the overlay `images:`.
+              image: kwim-service:latest
+              envFrom:
+                - configMapRef: { name: kwim-codegraph-config }
+              # Backend endpoints - see kwim-service.yaml; override hosts in your overlay.
+              env:
+                - { name: KWIM_FALKOR_HOST, value: "falkordb" }
+                - { name: KWIM_FALKOR_PORT, value: "6379" }
+                - { name: KWIM_RMQ_HOST,    value: "rabbitmq" }
+                - { name: KWIM_RMQ_PORT,    value: "5672" }
+                - { name: KWIM_RMQ_USER,    value: "kwim" }
+                - { name: KWIM_RMQ_VHOST,   value: "/kwim" }
+                - { name: KWIM_EMBEDDER_URL, value: "http://embedder:80" }
+              command:
+                - /app/with-secrets.sh
+                - sh
+                - -c
+                - |
+                  set -e
+                  for pair in $REPOS; do
+                    name="${pair%%=*}"
+                    echo "=== extract $name (team=$name) ==="
+                    python -m app.codegraph.extract --team "$name" --repo "$name" --path "/cache/$name"
+                    echo "=== distill $name ==="
+                    python -m app.codegraph.distill --team "$name" --repo "$name"
+                  done
+              volumeMounts:
+                - { name: cache, mountPath: /cache, readOnly: true }
+                - { name: secrets, mountPath: /secrets, readOnly: true }
+              resources:
+                requests: { cpu: 250m, memory: 512Mi }
+                limits:   { memory: 2Gi }

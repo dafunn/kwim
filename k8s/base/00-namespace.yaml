@@ -1,0 +1,29 @@
+---
+# KWIM namespace. All KWIM infrastructure components share this namespace;
+# multi-team tenancy is logical (graph-per-tenant in FalkorDB, schema-per-team in
+# Postgres, vhost/routing in RabbitMQ), not namespace-per-team.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kwim
+  labels:
+    app.kubernetes.io/name: kwim
+    app.kubernetes.io/part-of: kwim
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falkordb
+  namespace: kwim
+  labels:
+    app.kubernetes.io/name: falkordb
+    app.kubernetes.io/part-of: kwim
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kwim-service
+  namespace: kwim
+  labels:
+    app.kubernetes.io/name: kwim-service
+    app.kubernetes.io/part-of: kwim

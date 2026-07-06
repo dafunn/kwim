@@ -1,0 +1,95 @@
+-- KWIM Memory - per-team schema. Rendered from this template for one team and
+-- applied as kwim_user. Idempotent (CREATE ... IF NOT EXISTS).
+--
+-- Tenancy: schema-per-team inside the single `kwim` database. This template is
+-- the repeatable per-team unit - adding a team is one templated render, not a
+-- hand edit. Rendered for team: {{ kwim_team }}
+--
+-- Scope: the durable Postgres system-of-record for a team -
+--   (1) Episodic memory (the event log), and
+--   (2) the governance COMMIT LOG (append-only record of committed K facts / W
+--       rules from which the team's FalkorDB graph is rebuilt).
+-- Semantic + working memory live in the team's FalkorDB graph, not here.
+-- The commit_log table is created now (schema pinned); the gate that writes to
+-- it is a separate KWIM component. gen_random_uuid() is core in PG17 - no extension needed.
+-- See docs/data-model.md.
+
+CREATE SCHEMA IF NOT EXISTS {{ kwim_team }};
+
+CREATE TABLE IF NOT EXISTS {{ kwim_team }}.episodic_events (
+    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id           text        NOT NULL,
+    session_id         text        NOT NULL,
+    event_type         text        NOT NULL,
+    event_data         jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    occurred_at        timestamptz NOT NULL DEFAULT now(),
+    compressed_summary text,
+    archived           boolean     NOT NULL DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_episodic_session
+    ON {{ kwim_team }}.episodic_events (session_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_episodic_agent
+    ON {{ kwim_team }}.episodic_events (agent_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_episodic_unarchived
+    ON {{ kwim_team }}.episodic_events (occurred_at) WHERE NOT archived;
+
+-- Governance commit log: append-only, ordered by seq for deterministic replay.
+-- One row per committed change (supersede-not-mutate; state derived by replay).
+-- payload = node content, provenance = the edges - together sufficient to rebuild
+-- the FalkorDB graph. The governance gate is what writes here.
+CREATE TABLE IF NOT EXISTS {{ kwim_team }}.commit_log (
+    seq           bigserial   PRIMARY KEY,
+    id            uuid        NOT NULL DEFAULT gen_random_uuid(),
+    committed_at  timestamptz NOT NULL DEFAULT now(),
+    object_type   text        NOT NULL CHECK (object_type IN ('fact','rule')),
+    object_id     text        NOT NULL,
+    operation     text        NOT NULL CHECK (operation IN ('commit','deprecate','reinforce','retract','confirm')),
+    payload       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    provenance    jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    proposed_by   text,
+    source_kind   text        CHECK (source_kind IN ('agent_proposal','repo_sync','promotion','distiller')),
+    gate_decision text        CHECK (gate_decision IN ('auto_committed','human_approved','human_retracted','human_confirmed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_commit_object
+    ON {{ kwim_team }}.commit_log (object_id, seq);
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_commit_type
+    ON {{ kwim_team }}.commit_log (object_type, committed_at);
+
+-- Retrofit the relaxed CHECKs onto already-provisioned teams - CREATE TABLE IF NOT EXISTS
+-- is a no-op for those, so the constraints must be widened explicitly. Idempotent:
+-- DROP IF EXISTS then ADD with the new allowed-value set.
+ALTER TABLE {{ kwim_team }}.commit_log DROP CONSTRAINT IF EXISTS commit_log_operation_check;
+ALTER TABLE {{ kwim_team }}.commit_log ADD CONSTRAINT commit_log_operation_check
+    CHECK (operation IN ('commit','deprecate','reinforce','retract','confirm'));
+
+ALTER TABLE {{ kwim_team }}.commit_log DROP CONSTRAINT IF EXISTS commit_log_source_kind_check;
+ALTER TABLE {{ kwim_team }}.commit_log ADD CONSTRAINT commit_log_source_kind_check
+    CHECK (source_kind IN ('agent_proposal','repo_sync','promotion','distiller'));
+
+ALTER TABLE {{ kwim_team }}.commit_log DROP CONSTRAINT IF EXISTS commit_log_gate_decision_check;
+ALTER TABLE {{ kwim_team }}.commit_log ADD CONSTRAINT commit_log_gate_decision_check
+    CHECK (gate_decision IN ('auto_committed','human_approved','human_retracted','human_confirmed'));
+
+-- Human-review surface: durable holding pen for proposals the gate routed
+-- to "review" instead of auto-committing. Resolution is an atomic claim
+-- (UPDATE ... WHERE resolved_at IS NULL RETURNING *) so concurrent
+-- approve/reject races resolve safely. Also serves as the rejection audit
+-- trail (Postgres, not Redis/FalkorDB - those are disposable).
+CREATE TABLE IF NOT EXISTS {{ kwim_team }}.pending_proposals (
+    proposal_id  uuid        PRIMARY KEY,
+    object_type  text        NOT NULL CHECK (object_type IN ('fact','rule')),
+    proposed_by  text,
+    body         jsonb       NOT NULL,
+    bus_message  jsonb       NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    resolved_at  timestamptz,
+    resolution   text        CHECK (resolution IN ('approved','rejected')),
+    resolved_by  text,
+    resolved_via text        CHECK (resolved_via IN ('api','mattermost')),
+    reject_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_{{ kwim_team }}_pending_open
+    ON {{ kwim_team }}.pending_proposals (created_at) WHERE resolved_at IS NULL;

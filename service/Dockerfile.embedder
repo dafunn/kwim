@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+# Derived TEI CPU image with sentence-transformers/all-MiniLM-L6-v2 baked in.
+#
+# Multi-stage: the model is downloaded in a throwaway python stage (which has
+# egress in CI) and COPYed into the TEI runtime image. The TEI image's own
+# system Python is never touched - no apt, no pip, no PEP 668 override. The
+# running pod loads the model from disk with zero HF Hub access (DNS only).
+
+# --- Stage 1: download the model (build-time only, has egress) ---
+# python:3.x-slim installs Python into /usr/local and is NOT PEP 668
+# "externally managed", so pip install works without any override.
+FROM python:3.11-slim AS downloader
+RUN pip install --no-cache-dir huggingface-hub==0.25.0
+# HF Hub default read timeout is 10s (too short for CDN blips); raise to 60s.
+ENV HF_HUB_DOWNLOAD_TIMEOUT=60
+# Pinned to a specific model revision for reproducibility.
+# Shell retry loop (single logical RUN via `\` continuations) so a transient CDN
+# timeout doesn't fail the build. `python -c` stays a one-liner - a multi-line
+# python body inside RUN is a Dockerfile parse error. Fails the build (exit 1) only
+# after 3 failed attempts.
+RUN for attempt in 1 2 3; do \
+        python -c "from huggingface_hub import snapshot_download; snapshot_download('sentence-transformers/all-MiniLM-L6-v2', local_dir='/models/all-MiniLM-L6-v2', local_dir_use_symlinks=False, revision='1110a243fdf4706b3f48f1d95db1a4f5529b4d41')" \
+            && exit 0; \
+        echo "model download attempt ${attempt} failed; retrying in 5s..." >&2; \
+        sleep 5; \
+    done; \
+    echo "model download failed after 3 attempts" >&2; \
+    exit 1
+
+# --- Stage 2: TEI runtime with the model baked in ---
+FROM ghcr.io/huggingface/text-embeddings-inference:cpu-1.5@sha256:0502794a4d86974839e701dadd6d06e693ec78a0f6e87f68c391e88c52154f3f
+
+# Guarantee no runtime HF Hub access even if TEI's internals try to phone home.
+# The model is local; DNS-only egress is the design intent.
+ENV HF_HUB_OFFLINE=1
+
+# Copy the pre-downloaded model in, owned by the TEI runtime user (uid 1000).
+# Numeric --chown needs no /etc/passwd entry; the TEI image runs as 1000.
+COPY --from=downloader --chown=1000:1000 /models /models
+
+USER 1000
+
+# TEI entrypoint is set in the base image; point it at the local model.
+CMD ["--model-id", "/models/all-MiniLM-L6-v2"]

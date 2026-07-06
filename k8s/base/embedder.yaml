@@ -1,0 +1,88 @@
+---
+# Embedder service - CPU-only TEI workload serving all-MiniLM-L6-v2 (384-d).
+# Stateless, not node-pinned. The model is baked into the image; the running
+# pod needs DNS only (no HF Hub egress).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedder
+  namespace: kwim
+  labels:
+    app: embedder
+    app.kubernetes.io/name: embedder
+    app.kubernetes.io/part-of: kwim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: embedder
+  template:
+    metadata:
+      labels:
+        app: embedder
+        app.kubernetes.io/name: embedder
+        app.kubernetes.io/part-of: kwim
+    spec:
+      # Add imagePullSecrets here (or via an overlay) if your registry is private.
+      containers:
+        - name: embedder
+          # Bare image name; set registry + tag via the `images:` transformer in your overlay.
+          image: kwim-embedder:latest
+          # Override the image CMD to add --auto-truncate: all-MiniLM-L6-v2 caps at
+          # 256 tokens and TEI REJECTS longer inputs by default (500). Some stored
+          # docs run longer than that - truncate the embedding instead of erroring.
+          # (Full text is still stored as :SemanticItem.content; long docs are
+          # fetched by metadata, not vector search, so a truncated embedding is
+          # acceptable.)
+          args:
+            - --model-id
+            - /models/all-MiniLM-L6-v2
+            - --auto-truncate
+          env:
+            - { name: HF_HUB_OFFLINE, value: "1" }
+            # Trace propagation - TEI's native OTLP/gRPC exporter; note the http://
+            # scheme (TEI's gRPC client requires it). Unset by default; set the OTLP
+            # endpoint in your overlay to enable.
+            - { name: OTLP_ENDPOINT, value: "" }
+            - { name: OTLP_SERVICE_NAME, value: "kwim-embedder" }
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedder
+  namespace: kwim
+  labels:
+    app: embedder
+    app.kubernetes.io/name: embedder
+    app.kubernetes.io/part-of: kwim
+spec:
+  type: ClusterIP
+  selector:
+    app: embedder
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

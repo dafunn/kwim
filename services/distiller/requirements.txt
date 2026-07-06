@@ -1,0 +1,9 @@
+# Self-contained distiller deps - the exact subset the distiller + its helpers import,
+# pinned to match what langgraph-base provided (so behavior is unchanged post-untangle).
+# app.py: langchain_core.messages (via langchain-openai); kwim.py: httpx;
+# llm_router.py: langchain_openai; otel.py: opentelemetry-{sdk,exporter,instrumentation}.
+langchain-openai==1.2.1
+httpx==0.28.1
+opentelemetry-sdk==1.42.0
+opentelemetry-exporter-otlp-proto-grpc==1.42.0
+opentelemetry-instrumentation-httpx==0.63b0

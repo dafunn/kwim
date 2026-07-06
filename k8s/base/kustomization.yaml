@@ -1,0 +1,28 @@
+# KWIM core workload - a generic, deployment-agnostic base.
+#
+# Deploy directly for a simple single-namespace install (`kubectl apply -k`), or
+# reference this base from an overlay that patches in your container registry,
+# backend hostnames, secrets, node placement, and any add-ons (a model gateway,
+# network policies, GitOps automation) - layer those in your own kustomize overlay.
+#
+# What you must provide in your environment (the base only references them):
+#   - image registry + tags for `kwim-service` / `kwim-embedder` (kustomize `images:`)
+#   - a pull secret named `registry-credentials` (or edit imagePullSecrets)
+#   - Secrets: kwim-db, kwim-rabbitmq, kwim-falkordb, kwim-api-keys, falkordb-auth,
+#     and kwim-codegraph-git-token (provide via any secret manager)
+#   - backend hosts (Postgres/RabbitMQ) reachable at the configured KWIM_*_HOST
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kwim
+resources:
+  - 00-namespace.yaml
+  - falkordb.yaml
+  - kwim-service.yaml
+  - embedder.yaml
+  - codegraph-extract-cronjob.yaml
+# Metadata-only labels (never selectors - that would break the DNS-egress podSelector).
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: kwim
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false

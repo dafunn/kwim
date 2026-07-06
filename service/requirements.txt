@@ -1,0 +1,18 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+PyYAML==6.0.2                   # layered tunables config (app/config.py + kwim.defaults.yaml)
+psycopg[binary]==3.2.3          # Postgres: episodic + commit_log
+falkordb==1.0.10                # FalkorDB graph + vector + working-memory TTL (Redis protocol)
+aio-pika==9.5.4                 # RabbitMQ publish/consume on the /kwim vhost
+httpx==0.28.1                    # Embedder HTTP client (TEI)
+opentelemetry-sdk==1.42.0
+opentelemetry-exporter-otlp-proto-grpc==1.42.0
+opentelemetry-instrumentation-fastapi==0.63b0
+opentelemetry-instrumentation-httpx==0.63b0
+# Code graph (+T) extractor - app/codegraph/
+tree-sitter==0.25.2              # AST parsing (structure extraction)
+tree-sitter-python==0.25.0      # Python grammar (Python-first; add grammars per language)
+xxhash==3.7.1                    # xxh3 content hashing for incremental re-index
+networkx==3.6.1                  # Louvain community detection (worker-only, not request path)
+pathspec==1.1.1                  # .gitignore/.cgignore matching for discovery
