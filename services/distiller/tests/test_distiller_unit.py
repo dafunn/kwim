@@ -39,7 +39,7 @@ _NEXT_CURSOR = {"ts": _T2, "id": "evt-2"}
 
 def _no_watermark_window(window_events, next_cursor):
     """read_episodic fake: empty watermark, given window for the actual read."""
-    async def _read_episodic(since_ts=None, since_id=None, limit=500, event_type=None, agent_id=None, order="asc"):
+    async def _read_episodic(since_ts=None, since_id=None, limit=500, event_type=None, agent_id=None, order="asc", strict=False):
         if event_type == "distiller_watermark":
             return {"events": [], "next_cursor": None}
         return {"events": window_events, "next_cursor": next_cursor}
@@ -75,7 +75,7 @@ class TestWatermarkLoad:
         ]
         calls = []
 
-        async def fake_read_episodic(since_ts=None, since_id=None, limit=500, event_type=None, agent_id=None, order="asc"):
+        async def fake_read_episodic(since_ts=None, since_id=None, limit=500, event_type=None, agent_id=None, order="asc", strict=False):
             calls.append({"since_ts": since_ts, "since_id": since_id, "event_type": event_type})
             if event_type == "distiller_watermark":
                 return {"events": watermark_events, "next_cursor": {"ts": _T1, "id": "wm-1"}}
@@ -177,7 +177,7 @@ class TestSelfEventExclusion:
         assert len(fake_llm.calls) == 1
         human_content = fake_llm.calls[0][-1].content
         assert "distiller_watermark" not in human_content   # watermark event excluded
-        # Events are presented by `ref` index now (not raw id); the real events'
+        # Events are presented by `ref` index now (not raw id); the real events
         # content is present, the watermark's is not.
         assert "trend A recurs" in human_content
         assert '"ref": 1' in human_content and '"ref": 2' in human_content
@@ -370,3 +370,75 @@ class TestConstraintCandidatesNotAutoEmitted:
 
         knowledge_propose.assert_not_called()
         wisdom_propose.assert_not_called()
+
+
+class TestPreflight:
+    """Regression: a misconfigured distiller must crash, not report success.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_raises_when_preflight_fails(self, distiller_app, monkeypatch):
+        from kwim import KwimUnavailable
+
+        def _boom():
+            raise KwimUnavailable("no key")
+
+        monkeypatch.setattr(distiller_app, "require_available", _boom)
+        # If run() ever swallows this, the job exits 0 and the outage is invisible
+        with pytest.raises(KwimUnavailable):
+            await distiller_app.run()
+
+    @pytest.mark.asyncio
+    async def test_preflight_runs_before_any_read(self, distiller_app, monkeypatch):
+        """The preflight must gate the reads, not trail them."""
+        from kwim import KwimUnavailable
+
+        read_episodic = AsyncMock()
+        monkeypatch.setattr(distiller_app, "read_episodic", read_episodic)
+
+        def _boom():
+            raise KwimUnavailable("no key")
+
+        monkeypatch.setattr(distiller_app, "require_available", _boom)
+
+        with pytest.raises(KwimUnavailable):
+            await distiller_app.run()
+
+        read_episodic.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_window_read_does_not_look_like_an_empty_window(
+        self, distiller_app, monkeypatch
+    ):
+        """A strict read that raises must propagate, not advance the watermark."""
+        from kwim import KwimUnavailable
+
+        async def _failing_read(**kwargs):
+            raise KwimUnavailable("read failed")
+
+        monkeypatch.setattr(distiller_app, "read_episodic", _failing_read)
+        post = AsyncMock()
+        monkeypatch.setattr(distiller_app, "_post", post)
+
+        with pytest.raises(KwimUnavailable):
+            await distiller_app.run()
+
+        post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_distiller_requests_strict_reads(self, distiller_app, monkeypatch):
+        """Both reads must opt into strict, or the silent path stays open."""
+        seen = []
+
+        async def _recording_read(since_ts=None, since_id=None, limit=500,
+                                  event_type=None, agent_id=None, order="asc",
+                                  strict=False):
+            seen.append(strict)
+            return {"events": [], "next_cursor": None}
+
+        monkeypatch.setattr(distiller_app, "read_episodic", _recording_read)
+
+        await distiller_app.run()
+
+        assert seen, "run() performed no reads"
+        assert all(seen), f"non-strict read(s) in the distiller: {seen}"

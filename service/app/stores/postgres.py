@@ -184,7 +184,7 @@ class PostgresStore:
 
         `order="asc"` (default): `(occurred_at, id) > (since_ts, since_id)` is an exclusive
         lower bound - a stable total order over rows sharing one occurred_at timestamp.
-        `order="desc"`: the cursor is an exclusive *upper* bound (`<`), and rows come back
+        `order="desc"`: the cursor is an exclusive upper bound (`<`), and rows come back
         newest-first - e.g. `limit=1` with no cursor fetches the single latest event in O(1),
         regardless of how many rows exist (the watermark lookup's use case). Cursor is
         omitted entirely when since_ts is None (read from start/end). Excludes archived rows

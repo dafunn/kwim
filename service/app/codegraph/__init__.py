@@ -1,4 +1,4 @@
-"""Code graph (+T) extractor - parses repos into the kwim_<team>_code graph.
+"""Code graph extractor - parses repos into the kwim_<team>_code graph.
 
 Ports the patterns of DeusData/codebase-memory-mcp (MIT) into Python, Python-first:
 tree-sitter structure extraction + a confidence-scored call-resolution cascade,

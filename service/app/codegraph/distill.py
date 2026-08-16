@@ -1,12 +1,12 @@
-"""Code distiller (+T loop) - derive governed Knowledge from the code graph.
+"""Code distiller - derive governed Knowledge from the code graph.
 
-Derives a small, high-signal set from kwim_<team>_code - ONE per-repo architecture
+Derives a small, high-signal set from kwim_<team>_code - one per-repo architecture
 summary (its load-bearing functions) plus cross-repo interfaces - and proposes them
 through the existing governance gate (publishes `knowledge.proposed` on the bus, like
 POST /v1/knowledge/propose, with source_kind="repo_sync"). The gate screens + commits
 them, so they become governed :Fact nodes that survive rebuild and that warm-start
 retrieves by `about`. Per-function structural facts are not distilled - that detail
-(exact callers, impact) is answered on-demand by the +T trace tool instead.
+(exact callers, impact) is answered on-demand by the /v1/code/trace read instead.
 
 Run after extraction:
   python -m app.codegraph.distill --team T --repo R [--min-fan-in N]
@@ -35,9 +35,8 @@ async def _sync_fact(
 
     Uses `query_facts(..., about=[identity_ref])` then filters client-side to the
     exact identity (the store's about match is ANY/OR and case-insensitive). An
-    unchanged statement means no proposal is published, which is the flood-protection
-    that replaces the old gate short-circuit. A changed statement publishes a
-    `supersedes=<current id>` proposal with no `object_id`.
+    unchanged statement means no proposal is published, while a changed statement
+    publishes a `supersedes=<current id>` proposal with no `object_id`.
 
     Returns True iff a proposal was published.
     """
@@ -151,7 +150,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="app.codegraph.distill", description="KWIM code distiller (+T loop)")
+    ap = argparse.ArgumentParser(prog="app.codegraph.distill", description="KWIM code distiller")
     ap.add_argument("--team", required=True)
     ap.add_argument("--repo", required=True)
     ap.add_argument("--min-fan-in", type=int, default=None,

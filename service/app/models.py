@@ -33,6 +33,15 @@ class Fact(BaseModel):
     source_kind: str | None = None
 
 
+class FactMatch(Fact):
+    """A fact returned by semantic search (knowledge/search).
+
+    `score` is a cosine distance - lower = closer, identical vector -> 0.0 - the same
+    convention as SemanticItem.score, so callers rank ascending.
+    """
+    score: float
+
+
 class FactProvenance(BaseModel):
     proposed_by: str | None = None
     supported_by: list[str] = Field(default_factory=list)   # episodic_event_id refs
@@ -190,7 +199,7 @@ class ProposalStatus(BaseModel):
     detail: str | None = None
 
 
-# --- Code graph (+T) ----------------------------------------------------------
+# --- Code graph ---------------------------------------------------------------
 
 class CodeFunction(BaseModel):
     id: str

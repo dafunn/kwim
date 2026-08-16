@@ -62,11 +62,10 @@ spec:
               mountPath: /var/lib/falkordb/data
           resources:
             requests:
-              # Raised from 256Mi/1Gi: FalkorDB is in-memory and now also holds the
+              # Raised from 256Mi/1Gi: FalkorDB is in-memory and also holds the
               # per-team code graph (kwim_<team>_code - nodes/edges + 384-d function
-              # embeddings), which is larger than the K/W store. Sized from measuring
-              # KWIM's own repo (~360 functions/2.3k edges ~= low-MB per repo); raise
-              # further as more/larger repos are indexed.
+              # embeddings), which is larger than the K/W store. Raise further as
+              # more/larger repos are indexed.
               memory: "512Mi"
               cpu: "100m"
             limits:

@@ -18,7 +18,7 @@ otel.configure()
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from kwim import _post, knowledge_propose, read_episodic, wisdom_propose
+from kwim import _post, knowledge_propose, read_episodic, require_available, wisdom_propose
 from llm_router import make_llm
 
 log = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ Two kinds of output:
   Fields: situation (object - matchable fields like task_type/platform),
   approach (string), evidence (list of integer ref numbers).
 
-decay_class for facts - you MUST set this explicitly based on how quickly the
+decay_class for facts - you must set this explicitly based on how quickly the
 claim goes stale:
 - "fast": trends, current activity levels, what's popular/trending right now,
   anything tied to the current moment.
@@ -180,7 +180,7 @@ async def _distill(events: list[dict]) -> list[dict] | None:
     """LLM policy step.
 
     Returns the candidate list (possibly empty) on a successful LLM round-trip,
-    or **None if the LLM call/parse failed**. The caller must not advance the
+    or None if the LLM call/parse failed. The caller must not advance the
     watermark on None - a transient failure would otherwise silently skip the
     window forever. An empty list means the LLM ran and found nothing worth
     keeping (safe to advance past)."""
@@ -238,7 +238,9 @@ async def _load_watermark() -> tuple[str | None, str | None]:
     # order="desc" + limit=1: the single latest watermark event in O(1), regardless
     # of how many have accumulated (an "asc"+limit page would stay anchored on the
     # oldest events forever once their count exceeds the limit).
-    result = await read_episodic(event_type=WATERMARK_EVENT_TYPE, limit=1, order="desc")
+    result = await read_episodic(
+        event_type=WATERMARK_EVENT_TYPE, limit=1, order="desc", strict=True
+    )
     events = result.get("events") or []
     if not events:
         return None, None
@@ -259,8 +261,16 @@ async def _advance_watermark(cursor: dict) -> None:
 
 
 async def run() -> None:
+    # Preflight before any work. The KWIM client is fail-soft by design, so
+    # without this a missing key turns every call into a None-returning no-op:
+    # the window reads empty, "nothing to distill" looks like a clean run, and
+    # the job exits 0.
+    require_available()
+
     last_ts, last_id = await _load_watermark()
-    window = await read_episodic(since_ts=last_ts, since_id=last_id, limit=WINDOW_LIMIT)
+    window = await read_episodic(
+        since_ts=last_ts, since_id=last_id, limit=WINDOW_LIMIT, strict=True
+    )
     raw_events = window.get("events") or []
     if not raw_events:
         log.info("distiller: empty window, nothing to distill")

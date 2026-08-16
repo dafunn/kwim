@@ -2,13 +2,13 @@
 
 WHY THIS FILE EXISTS
 --------------------
-The old script-style tests each ran in their *own* process, so every file could
+The old script-style tests each ran in their own process, so every file could
 set its own `KWIM_*` env vars and get a fresh `app.config.settings` /
 `app.auth._KEY_MAP` on import. Under pytest the whole suite shares one process
 and one import of those modules - both `settings` (a frozen dataclass) and the
 auth key map are built exactly once, at first import.
 
-So we set a *superset* of the env every module used, here, before anything
+So we set a superset of the env every module used, here, before anything
 imports `app.*`. pytest imports conftest.py ahead of the test modules in its
 directory, so this runs first and the singletons are built with all keys/tunables
 present.
@@ -25,7 +25,7 @@ resolves without the per-file sys.path.insert hacks.
 """
 import os
 
-# --- Env superset - MUST be set before any `app.*` import (see module docstring).
+# --- Env superset - must be set before any `app.*` import (see module docstring).
 os.environ["KWIM_API_KEYS"] = "devkey:acme,promoter:acme,otherkey:otherteam"
 os.environ["KWIM_PROMOTE_KEYS"] = "promot"   # key_id of "promoter"
 os.environ["KWIM_REVIEW_KEYS"] = "devkey"    # key_id of "devkey"

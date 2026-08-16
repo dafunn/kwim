@@ -1,5 +1,5 @@
 ---
-# Code graph (+T) extractor - periodically indexes allow-listed repos into each
+# Code graph extractor - periodically indexes allow-listed repos into each
 # team's kwim_<team>_code graph, then distills structural facts through the gate.
 #
 # Pipeline per run: initContainer clones/fetches the repos into a cache PVC, then

@@ -8,7 +8,7 @@ Run inside the kwim-service pod (it already has all credentials):
 
 The rebuild is Postgres-read-only. It replays commit_log (facts + rules) and
 re-embeds episodic events with text (semantic memory). Working memory and
-proposal-status TTL keys are NOT rebuilt - they are ephemeral by design.
+proposal-status TTL keys are not rebuilt - they are ephemeral by design.
 """
 import argparse
 import asyncio
@@ -94,7 +94,11 @@ async def _rebuild_semantic(
     team: str,
     graph_name: str | None,
 ) -> None:
-    """Re-embed episodic events with text into the target graph (batched)."""
+    """Re-embed episodic events with text into the target graph (batched).
+
+    TODO: items written via POST /v1/memory/semantic are not covered - they have
+    no Postgres record to replay. See `main.memory_semantic_write`.
+    """
     events = await pg.episodic_with_text(team)
     for i in range(0, len(events), _EMBED_BATCH):
         batch = events[i : i + _EMBED_BATCH]

@@ -232,6 +232,64 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+# Case 4: Strict paths -> loud failure
+#
+# Fail-soft is right for agents and fatal for KWIM-only jobs.
+# ---------------------------------------------------------------------------
+print("\n=== Strict paths (require_available / read_episodic strict) ===")
+
+
+def _expect_unavailable(label, fn):
+    try:
+        fn()
+    except kwim.KwimUnavailable:
+        assert_true(label, True)
+    except Exception as exc:  # noqa: BLE001 - any other type is a failure
+        assert_true(f"{label} (raised {type(exc).__name__} instead)", False)
+    else:
+        assert_true(f"{label} (did not raise)", False)
+
+
+kwim.KWIM_BASE_URL = ""
+kwim._api_key = None
+kwim._key_tried = True
+
+try:
+    _expect_unavailable("require_available raises when KWIM_BASE_URL unset",
+                        kwim.require_available)
+
+    kwim.KWIM_BASE_URL = "http://kwim.test"
+    _expect_unavailable("require_available raises when the key is unreadable",
+                        kwim.require_available)
+
+    # The message must name the path it looked in
+    try:
+        kwim.require_available()
+    except kwim.KwimUnavailable as exc:
+        assert_true("require_available names the key path it tried",
+                    "kwim-api-key" in str(exc))
+        assert_true("require_available names KWIM_SECRETS_DIR as the fix",
+                    "KWIM_SECRETS_DIR" in str(exc))
+
+    kwim._api_key = "test-key"
+    assert_eq("require_available returns the key once readable",
+              kwim.require_available(), "test-key")
+
+    # A failed read must not masquerade as an empty window.
+    kwim.httpx.AsyncClient = lambda **kw: _BrokenClient()
+    assert_eq("read_episodic fail-soft still yields the empty sentinel",
+              _run(kwim.read_episodic()),
+              {"events": [], "next_cursor": None})
+    _expect_unavailable("read_episodic(strict=True) raises on a failed read",
+                        lambda: _run(kwim.read_episodic(strict=True)))
+finally:
+    kwim.httpx.AsyncClient = _real_async_client
+    kwim.KWIM_BASE_URL = _original_url
+    kwim._api_key = None
+    kwim._key_tried = False
+
+
+# ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
 print()

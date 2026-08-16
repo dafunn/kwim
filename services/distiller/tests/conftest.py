@@ -9,7 +9,7 @@ OTLP, an LLM, or langchain. So we:
   * put the distiller dir (for `app`, flat imports) and clients/python (for the
     real `kwim` + `secret_reader`) on sys.path, and
   * stub the infra boundaries the tests don't exercise (`otel`, `llm_router`,
-    `langchain_core.messages`) BEFORE importing app.py, keeping the test deps to
+    `langchain_core.messages`) before importing app.py, keeping the test deps to
     just the pytest stack + httpx.
 
 Run from services/distiller/:  ../../service/.venv/bin/python -m pytest
@@ -68,12 +68,18 @@ sys.modules["langchain_core.messages"] = _lc_messages
 
 
 @pytest.fixture
-def distiller_app():
+def distiller_app(monkeypatch):
     """The distiller app module (services/distiller/app.py).
 
     Tests monkeypatch its module-level names (read_episodic / knowledge_propose /
     wisdom_propose / _post / make_llm), which app.run() references as globals.
+
+    `require_available` - run()'s credential preflight - is stubbed here with the
+    other infra boundaries: these tests fake the whole KWIM client surface, so
+    there is no key or base URL to find. Tests that exercise the preflight itself
+    (TestPreflight) re-patch it or call the real one directly.
     """
     import app
 
+    monkeypatch.setattr(app, "require_available", lambda: "test-key")
     return app

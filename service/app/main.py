@@ -27,7 +27,7 @@ from .models import (
     Accepted, AdvisoryProposal, AuditVersion, CheckRequest, CheckResult,
     CodeArchitecture, CodeChange, CodeFunction, ConstraintProposal,
     EpisodicCursor, EpisodicEvent, EpisodicEventOut, EpisodicWindow, EventAccepted, Fact,
-    FactAudit, FactDetail, FactProposal, FactProvenance,
+    FactAudit, FactDetail, FactMatch, FactProposal, FactProvenance,
     ProposalStatus, Rule, SeedRule, SemanticItem, SemanticWrite, WorkingWrite,
 )
 from .review import review
@@ -42,21 +42,30 @@ _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 _FRESHNESS_SORT = {"fresh": 0, "aging": 1, "stale": 2}
 
 
-def _enrich_facts(rows: list[dict]) -> list[dict]:
-    """Add freshness + as_of to each fact row and sort fresh-first.
+def _enrich_fact(r: dict) -> dict:
+    """Add freshness + as_of to one fact row.
 
     `as_of` is the later of `created_at` and `last_verified_at` (if present),
     so a re-verified fact does not age while the pipeline is still vouching for it.
     """
-    enriched = []
-    for r in rows:
-        dc = r.get("decay_class") or "slow"
-        created_dt = _to_dt(r.get("created_at"))
-        verified_dt = _to_dt(r.get("last_verified_at"))
-        as_of_dt = max((dt for dt in (created_dt, verified_dt) if dt is not None), default=None)
-        as_of = as_of_dt.isoformat() if as_of_dt is not None else ""
-        f = compute_freshness(as_of, dc, settings.halflife_slow_days, settings.halflife_fast_hours)
-        enriched.append({**r, "decay_class": dc, "as_of": as_of, "freshness": f})
+    dc = r.get("decay_class") or "slow"
+    created_dt = _to_dt(r.get("created_at"))
+    verified_dt = _to_dt(r.get("last_verified_at"))
+    as_of_dt = max((dt for dt in (created_dt, verified_dt) if dt is not None), default=None)
+    as_of = as_of_dt.isoformat() if as_of_dt is not None else ""
+    f = compute_freshness(as_of, dc, settings.halflife_slow_days, settings.halflife_fast_hours)
+    return {**r, "decay_class": dc, "as_of": as_of, "freshness": f}
+
+
+def _enrich_facts(rows: list[dict]) -> list[dict]:
+    """Enrich every row and sort fresh-first - the ranking knowledge/query and the
+    context bundle use. The sort is stable, so rows already ordered by relevance
+    keep that order within a freshness band.
+
+    knowledge/search deliberately does not use this: there, distance ordering is
+    the answer, so it enriches per-row and leaves the ranking alone.
+    """
+    enriched = [_enrich_fact(r) for r in rows]
     enriched.sort(key=lambda x: _FRESHNESS_SORT.get(x["freshness"], 0))
     return enriched
 
@@ -110,7 +119,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="KWIM", version="0.1.0",
+    title="KWIM", version="0.2.0",
     summary="Knowledge - Wisdom - Intelligence - Memory - the contract teams code against.",
     lifespan=lifespan,
 )
@@ -137,6 +146,37 @@ async def knowledge_query(team: TeamContext = CurrentTeam,
     rows = await State.falkor.query_facts(team.team, fact_type, status_, limit,
                                           about=about, source_kind=source_kind)
     return [Fact(**r) for r in _enrich_facts(rows)]
+
+@knowledge.get("/search", response_model=list[FactMatch])
+async def knowledge_search(q: str, limit: int = 10, fact_type: str | None = None,
+                           about: list[str] | None = Query(None),
+                           team: TeamContext = CurrentTeam):
+    """Semantic search over governed facts - Tier 1 retrieval for Knowledge.
+
+    The retrieval counterpart to /query. /query needs the caller to already know the
+    tag it wants; this one takes free text and answers "what do we know about this?"
+    - the case where the agent does not know what it is looking for.
+
+    Results are ranked by cosine distance (`score`, lower = closer) and are not
+    re-sorted by freshness; each carries its own freshness marker so the caller
+    can judge.
+    `about` / `fact_type` narrow the candidate set before scoring, with the same
+    case-insensitive semantics /query uses.
+
+    Facts with no embedding cannot match - see `app.backfill_embeddings`.
+    """
+    try:
+        qvec = (await State.embedder.embed([q]))[0]
+    except Exception as exc:
+        # 503, never an empty list. A silent [] here is indistinguishable from
+        # "we know nothing about that", which is the one answer this endpoint
+        # must never give by accident.
+        log.warning("knowledge_search: embed failed for q=%r: %s", q, exc)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="embedder unavailable - semantic search cannot run") from exc
+    rows = await State.falkor.search_facts(team.team, qvec, limit=limit,
+                                           about=about, fact_type=fact_type)
+    return [FactMatch(**_enrich_fact(r)) for r in rows]
 
 @knowledge.get("/facts/{fact_id}", response_model=FactDetail)
 async def knowledge_fact(fact_id: str, team: TeamContext = CurrentTeam):
@@ -297,7 +337,7 @@ async def wisdom_promote(rule_id: str, team: TeamContext = CurrentTeam):
     if not allowed_prefixes:
         # Fail-closed: promotion is a human-only, high-bar governance action that writes
         # to the shared universe graph. Unless an operator has explicitly granted promote
-        # capability via KWIM_PROMOTE_KEYS, nobody promotes (an unset var must NOT mean
+        # capability via KWIM_PROMOTE_KEYS, nobody promotes (an unset var must not mean
         # "any team key, including agent keys, can push to universe").
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             detail="promotion not configured - set KWIM_PROMOTE_KEYS to grant promote capability")
@@ -494,9 +534,11 @@ async def memory_context(
     (?situation.<key>=<value> params) and packs approved rules, ranked by
     evidence_count.
 
-    Knowledge enrichment: when `subject` is present, queries facts by `about`
-    match and populates the knowledge slot. Coverage markers signal whether each
-    slot was queried and non-empty (the absence trigger for callers).
+    Knowledge enrichment: when `subject` is present, the knowledge slot is the union
+    of an exact `about` tag match and a semantic KNN over the same facts, so a
+    free-text subject the caller has no tag for still retrieves. Coverage markers
+    signal whether each slot was queried and non-empty (the absence trigger for
+    callers), and break the knowledge count down by how it was found.
     """
     situation = _situation_params(request)
     recent = await State.pg.recent_episodic(team.team, session_id)
@@ -516,22 +558,52 @@ async def memory_context(
         for r in wisdom_rows
     ]
 
+    # One embed of `subject` serves both semantic slots (knowledge KNN + code).
+    qvec: list[float] | None = None
+    if subject:
+        try:
+            qvec = (await State.embedder.embed([subject]))[0]
+        except Exception:
+            log.warning("memory_context: embed failed for subject=%r", subject)
+
     knowledge: list[dict] = []
     knowledge_queried = False
+    tag_n = semantic_n = 0
     if subject:
         knowledge_queried = True
+        tag_rows: list[dict] = []
         try:
-            k_rows = await State.falkor.query_facts(
+            tag_rows = await State.falkor.query_facts(
                 team.team, fact_type=None, status="current",
                 limit=settings.fact_query_limit, about=[subject])
-            knowledge = _enrich_facts(k_rows)
         except Exception:
-            log.warning("memory_context: knowledge query failed for subject=%r", subject)
-            knowledge = []
+            log.warning("memory_context: knowledge tag query failed for subject=%r", subject)
+        tag_n = len(tag_rows)
+
+        # `subject` doubles as a tag and as free text. The tag hit is exact and
+        # high-precision, so it leads; the KNN is what answers a subject the caller
+        # could not have known the tag for. Union in that order, and the added
+        # retrieval can never cost an exact match.
+        sem_rows: list[dict] = []
+        if qvec is not None:
+            try:
+                sem_rows = await State.falkor.search_facts(
+                    team.team, qvec, limit=settings.fact_query_limit)
+            except Exception:
+                log.warning("memory_context: knowledge search failed for subject=%r", subject)
+        seen = {r["id"] for r in tag_rows}
+        # Distance cutoff, and drop `score` on the way in: the context bundle is one
+        # flat list of facts, so every row must have the same shape whichever half
+        # it came from. The per-half counts live in coverage instead.
+        new_sem = [{k: v for k, v in r.items() if k != "score"} for r in sem_rows
+                   if r["id"] not in seen
+                   and r.get("score", 1.0) <= settings.context_semantic_max_dist]
+        semantic_n = len(new_sem)
+        knowledge = _enrich_facts((tag_rows + new_sem)[: settings.fact_query_limit])
 
     k_freshness = worst_freshness([f["freshness"] for f in knowledge]) if knowledge else "fresh"
 
-    # Code slot (+T): a curated, repo-scoped warm-start map - signatures + summaries,
+    # Code slot: a curated, repo-scoped warm-start map - signatures + summaries,
     # never file bodies. Ranked by semantic match, tie-broken toward higher-confidence
     # structure. Small by design for weak models.
     code: list[dict] = []
@@ -540,11 +612,8 @@ async def memory_context(
     # default is the sentinel, not None - so gate on it actually being a list.
     if subject and isinstance(repos, list) and repos:
         code_cov["queried"] = True
-        try:
-            qvec = (await State.embedder.embed([subject]))[0]
-        except Exception:
-            log.warning("memory_context: code embed failed for subject=%r", subject)
-            qvec = None
+        # qvec is the shared `subject` embedding computed above; None means the
+        # embedder was down, and code_search degrades to structure-only ranking.
         # Which requested repos are actually indexed? Unindexed -> deterministic signal.
         indexed = await State.falkor.code_indexed_repos(team.team)
         missing = [r for r in repos if r not in indexed]
@@ -572,6 +641,10 @@ async def memory_context(
             "knowledge": {
                 "covered": len(knowledge) > 0, "n": len(knowledge),
                 "queried": knowledge_queried, "freshness": k_freshness,
+                # How the slot filled: exact `about` tag hits vs facts the semantic
+                # KNN added. semantic_n > 0 with tag_n == 0 is the case that used to
+                # come back empty.
+                "tag_n": tag_n, "semantic_n": semantic_n,
             },
             "wisdom": {"covered": len(wisdom) > 0, "n": len(wisdom)},
             "recent": {"covered": len(recent) > 0, "n": len(recent)},
@@ -620,6 +693,10 @@ async def memory_semantic_write(body: SemanticWrite, team: TeamContext = Current
 
     Accepts content + optional metadata, embeds it, and writes to FalkorDB.
     If `id` is omitted, generates a UUID.
+
+    TODO: this writes no Postgres record, so `app.rebuild` cannot replay these
+    items and a rebuild drops them. Persist the write, then replay it in
+    `rebuild._rebuild_semantic`.
     """
     item_id = body.id or str(uuid.uuid4())
     qvec = await State.embedder.embed([body.content])
@@ -658,16 +735,15 @@ async def proposal_status(proposal_id: str, team: TeamContext = CurrentTeam):
     return ProposalStatus(**doc)
 
 
-# --- Code graph (+T) - gated tooling over kwim_<team>_code -------------------
+# --- Code graph - reads over kwim_<team>_code --------------------------------
 # Read-only queries against the team's code graph. Every call emits an episodic
-# `code_tool_observation` event (the +T hook): the distiller can later promote
-# recurring observations (hubs, high-fan-in, cross-repo interfaces) into governed
-# K/W, closing the self-improving loop over code.
+# `code_tool_observation` event, which the distiller can promote into governed
+# K/W (hubs, high-fan-in, cross-repo interfaces).
 code = APIRouter(prefix="/v1/code", tags=["code"])
 
 
 async def _emit_code_observation(team: str, tool: str, args: dict, summary: dict) -> None:
-    """Land a +T tool result in episodic memory (best-effort - never fail the read)."""
+    """Land a code-graph read in episodic memory (best-effort - never fail the read)."""
     try:
         event = {
             "agent_id": "code-tool", "session_id": tool,
@@ -677,7 +753,7 @@ async def _emit_code_observation(team: str, tool: str, args: dict, summary: dict
         event_id = await State.pg.append_episodic(team, event)
         await State.bus.publish(team, "episodic", {"event_id": event_id, **event})
     except Exception:
-        log.warning("code +T observation emit failed (tool=%s)", tool)
+        log.warning("code observation emit failed (tool=%s)", tool)
 
 
 @code.get("/search", response_model=list[CodeFunction])

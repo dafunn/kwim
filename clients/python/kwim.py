@@ -15,11 +15,23 @@ import logging
 import os
 
 import httpx
-from secret_reader import read_secret
+from secret_reader import read_secret, secrets_dir
 
 log = logging.getLogger(__name__)
 
 KWIM_BASE_URL = os.environ.get("KWIM_BASE_URL", "").rstrip("/")
+
+
+class KwimUnavailable(RuntimeError):
+    """KWIM is unconfigured or unreachable, on a path that refuses to no-op.
+
+    Raised only from the strict entry points below (`require_available`,
+    `read_episodic(strict=True)`). The agent-facing emit paths stay fail-soft
+    and never raise this: breaking an agent pipeline over a side-channel is
+    worse than losing an event. For a job that exists solely to move KWIM
+    data the tradeoff inverts - a silent success is the worse outcome, because
+    it is indistinguishable from healthy and so can run dead for weeks.
+    """
 
 _api_key: str | None = None
 _key_tried = False
@@ -35,6 +47,25 @@ def _key() -> str | None:
         except Exception as exc:  # not mounted means KWIM stays a no-op
             log.warning("kwim: api key not available (%s); emits disabled", exc)
     return _api_key
+
+
+def require_available() -> str:
+    """Preflight for KWIM-only jobs: return the team key or raise.
+
+    The strict counterpart to `_key()`. Call this at startup from anything whose
+    whole purpose is KWIM work (the distiller), so a misconfigured deployment
+    exits non-zero instead of reporting success for doing nothing.
+    """
+    if not KWIM_BASE_URL:
+        raise KwimUnavailable("KWIM_BASE_URL is unset - there is nothing to talk to")
+    key = _key()
+    if not key:
+        raise KwimUnavailable(
+            f"KWIM api key not readable at {secrets_dir() / 'kwim-api-key'} - "
+            "if the secret is mounted elsewhere, point KWIM_SECRETS_DIR at that "
+            "directory (the default is /secrets)"
+        )
+    return key
 
 
 async def _get(path: str, params: dict | None = None) -> dict | list | None:
@@ -124,6 +155,27 @@ async def knowledge_query(
     if about:
         params["about"] = about
     result = await _get("/v1/knowledge/query", params)
+    return result if isinstance(result, list) else []
+
+
+async def knowledge_search(
+    q: str,
+    limit: int = 10,
+    fact_type: str | None = None,
+    about: list[str] | None = None,
+) -> list[dict]:
+    """Semantic search over governed facts. Fail-soft by initializing empty [].
+
+    Use this when you do not already know the tag - `knowledge_query(about=[...])`
+    is the exact-tag path, this one takes free text. Each result carries `score`
+    (cosine distance, lower = closer) and is ordered nearest-first.
+    """
+    params: dict[str, object] = {"q": q, "limit": limit}
+    if fact_type:
+        params["fact_type"] = fact_type
+    if about:
+        params["about"] = about
+    result = await _get("/v1/knowledge/search", params)
     return result if isinstance(result, list) else []
 
 
@@ -226,6 +278,7 @@ async def read_episodic(
     event_type: str | None = None,
     agent_id: str | None = None,
     order: str = "asc",
+    strict: bool = False,
 ) -> dict:
     """GET /v1/memory/episodic - windowed team read on the (occurred_at, id) cursor.
 
@@ -233,6 +286,10 @@ async def read_episodic(
     e.g. limit=1, order="desc" fetches the single latest matching event in O(1).
 
     Returns {events, next_cursor} or {events: [], next_cursor: None} on failure (fail-soft).
+
+    strict=True raises KwimUnavailable on a failed read instead of returning the
+    empty sentinel. Use it from jobs that branch on emptiness: fail-soft makes a
+    broken read look exactly like "no new events", which reads as success.
     """
     params: dict[str, object] = {"limit": limit, "order": order}
     if since_ts is not None:
@@ -246,6 +303,11 @@ async def read_episodic(
     result = await _get("/v1/memory/episodic", params)
     if isinstance(result, dict) and "events" in result:
         return result
+    if strict:
+        raise KwimUnavailable(
+            "read_episodic did not return a usable window - refusing to report "
+            "'no new events', which would be indistinguishable from success"
+        )
     return {"events": [], "next_cursor": None}
 
 

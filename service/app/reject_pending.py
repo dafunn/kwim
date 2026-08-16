@@ -1,11 +1,10 @@
 """Reject stale unresolved pending review proposals (queue cleanup).
 
 The pre-commit review queue accumulates one `pending_proposals` row per proposal the
-gate routes to review. Old contamination and pre-idempotency re-distillation left
-duplicates + garbage sitting unresolved. This bulk-resolves the unresolved ones as
-'rejected' (the same governed 'no' a human clicks - not a hard delete; the audit row
-stays), filtered by proposer source_kind so it only touches the intended ones
-(default `repo_sync` = the code distiller, leaving agent/episodic proposals alone).
+gate routes to review. This bulk-resolves the unresolved ones as 'rejected' (not a
+hard delete; the audit row stays), filtered by proposer source_kind so it only touches
+the intended ones (default `repo_sync` = the code distiller, leaving agent/episodic
+proposals alone).
 
 Standalone admin CLI (run via /app/with-secrets.sh, like app.forget). Dry-run by
 default; mutation needs --commit, and --confirm-count N (no-TTY) gates on the count

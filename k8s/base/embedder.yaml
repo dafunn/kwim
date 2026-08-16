@@ -29,7 +29,7 @@ spec:
           # Bare image name; set registry + tag via the `images:` transformer in your overlay.
           image: kwim-embedder:latest
           # Override the image CMD to add --auto-truncate: all-MiniLM-L6-v2 caps at
-          # 256 tokens and TEI REJECTS longer inputs by default (500). Some stored
+          # 256 tokens and TEI rejects longer inputs by default (500). Some stored
           # docs run longer than that - truncate the embedding instead of erroring.
           # (Full text is still stored as :SemanticItem.content; long docs are
           # fetched by metadata, not vector search, so a truncated embedding is

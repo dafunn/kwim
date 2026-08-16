@@ -294,7 +294,7 @@ def test_mm_action_forget_pending(review):
     assert r.status_code == 200
     msg = r.json()["update"]["message"]
     assert msg.startswith(":fire:")
-    # proposal rejected AND its source episodics forwarded to the inline forget path
+    # proposal rejected and its source episodics forwarded to the inline forget path
     assert review.pg.pending["p-forget-1"]["resolution"] == "rejected"
     last = review.gate.forget_episodic_calls[-1]
     assert last["episodic_ids"] == ["ep-aaa", "ep-bbb"]

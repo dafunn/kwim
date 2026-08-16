@@ -20,7 +20,7 @@ resources:
   - kwim-service.yaml
   - embedder.yaml
   - codegraph-extract-cronjob.yaml
-# Metadata-only labels (never selectors - that would break the DNS-egress podSelector).
+# Metadata-only labels
 labels:
   - pairs:
       app.kubernetes.io/part-of: kwim

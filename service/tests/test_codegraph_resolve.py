@@ -97,7 +97,7 @@ def test_unresolved_external_not_emitted():
         "x.py": (
             "import os\n"
             "def f():\n"
-            "    os.getcwd()\n"           # external - must NOT resolve to an internal def
+            "    os.getcwd()\n"           # external - must not resolve to an internal def
         ),
     }
     parsed = _parse(files)

@@ -252,8 +252,8 @@ async def test_screen_no_neighbors_commits():
 # 2b. Entity-scoped screening regression
 # ---------------------------------------------------------------------------
 
-# Realistic about sets share broad category refs; the screen must require ALL
-# proposal refs to be present in the candidate (not ANY shared ref).
+# Realistic about sets share broad category refs; the screen must require all
+# proposal refs to be present in the candidate (not any shared ref).
 _HOSTA_ABOUT = ["host-a", "group-x", "site-a"]
 _HOSTB_ABOUT = ["host-b", "group-x", "site-a"]
 
@@ -499,3 +499,68 @@ async def test_confirm_object_lifecycle():
 
     # Unknown object -> not_found.
     assert (await gate.confirm_object("acme", "unknown-id", "alice", "api"))["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# commit_proposal embeds when the caller has no vector (human-approved path)
+# ---------------------------------------------------------------------------
+
+async def test_commit_proposal_embeds_when_no_vector_supplied():
+    falkor, embedder = _FakeFalkor(), _FakeEmbedder(vec=[0.5] * 384)
+    gate = _make_gate(falkor=falkor, embedder=embedder)
+    body = {"statement": "Widgets ship sealed.", "fact_type": "product", "evidence": []}
+
+    await gate.commit_proposal(
+        "acme", "p-1", "fact", body, _proposal(body=body),
+        gate_decision="human_approved",
+        extra_provenance={"approved_by": "alice", "approved_via": "mattermost"},
+    )
+
+    assert embedder.calls == [["Widgets ship sealed."]]
+    assert falkor.materialized_facts[-1]["embedding"] == [0.5] * 384
+
+
+async def test_commit_proposal_keeps_the_screens_vector_when_given_one():
+    """The auto-commit path already screened with a vector - do not re-embed it."""
+    falkor, embedder = _FakeFalkor(), _FakeEmbedder()
+    gate = _make_gate(falkor=falkor, embedder=embedder)
+    body = {"statement": "Widgets ship sealed.", "fact_type": "product", "evidence": []}
+
+    await gate.commit_proposal("acme", "p-1", "fact", body, _proposal(body=body),
+                               embedding=[0.9] * 384)
+
+    assert embedder.calls == []
+    assert falkor.materialized_facts[-1]["embedding"] == [0.9] * 384
+
+
+async def test_commit_proposal_fails_open_when_embedder_is_down():
+    """A dead embedder must not block governance - the fact still commits, just
+    unembedded, and app.backfill_embeddings is the repair."""
+    falkor, embedder = _FakeFalkor(), _FakeEmbedder(raises=True)
+    gate = _make_gate(falkor=falkor, embedder=embedder)
+    body = {"statement": "Widgets ship sealed.", "fact_type": "product", "evidence": []}
+
+    doc = await gate.commit_proposal("acme", "p-1", "fact", body, _proposal(body=body),
+                                     gate_decision="human_approved")
+
+    assert doc["status"] == "committed"
+    assert falkor.materialized_facts[-1]["embedding"] is None
+
+
+async def test_commit_proposal_without_embedder_configured():
+    falkor = _FakeFalkor()
+    gate = _make_gate(falkor=falkor, embedder=None)
+    body = {"statement": "Widgets ship sealed.", "fact_type": "product", "evidence": []}
+
+    await gate.commit_proposal("acme", "p-1", "fact", body, _proposal(body=body))
+    assert falkor.materialized_facts[-1]["embedding"] is None
+
+
+async def test_commit_proposal_skips_blank_statements():
+    falkor, embedder = _FakeFalkor(), _FakeEmbedder()
+    gate = _make_gate(falkor=falkor, embedder=embedder)
+    body = {"statement": "   ", "fact_type": "product", "evidence": []}
+
+    await gate.commit_proposal("acme", "p-1", "fact", body, _proposal(body=body))
+    assert embedder.calls == []
+    assert falkor.materialized_facts[-1]["embedding"] is None

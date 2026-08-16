@@ -2,13 +2,13 @@
 
 How to stand up a KWIM stack from nothing. KWIM is **K**nowledge - **W**isdom -
 **I**ntelligence - **M**emory + **T**ooling - a thin integration layer over
-off-the-shelf infrastructure, not a monolith. This guide is the bring-up *order* and
-*what each step provisions*; the authoritative detail lives in the manifests (`k8s/`)
+off-the-shelf infrastructure, not a monolith. This guide is the bring-up order and
+what each step provisions; the authoritative detail lives in the manifests (`k8s/`)
 and schema (`db/`) in this repo.
 
-> Every provisioning and cleanup step is something you should **automate and codify**
-> in your own tooling, never hand-run against a live cluster/DB/secret store. Keep that
-> discipline when you adapt this.
+Every provisioning and cleanup step is something you should automate and codify
+in your own tooling, never hand-run against a live cluster/DB/secret store. Keep that
+discipline when you adapt this.
 
 ## What you're deploying
 
@@ -45,7 +45,7 @@ The order matters: each step provisions substrate the next depends on.
    and - if you use the review surface - `mm-webhook-url`, `mm-action-secret`. If you run
    the code graph, also provision a read-only token for cloning the indexed repos.
 2. **PostgreSQL substrate** (once). Create the KWIM database and the application role the
-   service connects as. (The role needs normal DML *including* DELETE - the Forget path's
+   service connects as. (The role needs normal DML including DELETE - the Forget path's
    preflight checks for it, and inline Forget deletes as this role.)
 3. **RabbitMQ** (once). A dedicated vhost + user for the governance bus.
 4. **Universe schema** (once per cluster). The shared cross-team `universe` schema
@@ -60,14 +60,14 @@ The order matters: each step provisions substrate the next depends on.
    the template in `db/` (`<team>.episodic_events` + `<team>.commit_log`); the team's
    FalkorDB graph (`kwim_<team>`) auto-creates on first write.
 8. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
-9. **(Optional) the code graph (+T).** Set `REPOS` in `k8s/codegraph-extract-cronjob.yaml`
-   as `name=owner/repo` pairs where **the name is also the team** the repo distills into
+9. **(Optional) the code graph.** Set `REPOS` in `k8s/codegraph-extract-cronjob.yaml`
+   as `name=owner/repo` pairs where the name is also the team the repo distills into
    (each repo gets its own `kwim_<name>_code` graph and proposes architecture facts into
    its own team's K/W). A daily CronJob runs it; trigger a one-off by creating a Job from
    the CronJob template. See `docs/operations.md` -> "add a repo".
 10. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
-    service then posts every proposal to a Mattermost `#kwim-review` channel with
-    Approve / Reject / Forget buttons.
+    service then posts every proposal to a Mattermost channel with Approve / Reject / Forget
+    buttons.
 
 ## Verify
 
@@ -84,7 +84,7 @@ Configuration has two surfaces, split by concern:
 - **Secrets + connection endpoints** are env vars, never files in the image:
   - **Secrets**: your secret store -> files at `/secrets/*` -> exported to `KWIM_*_PASSWORD`
     (and `KWIM_API_KEYS`, the capability allowlists, the review-surface secrets) by
-    `with-secrets.sh` (the service entrypoint *and* the wrapper for one-off admin commands
+    `with-secrets.sh` (the service entrypoint and the wrapper for one-off admin commands
     run via `kubectl exec`).
   - **Connection endpoints** (`KWIM_PG_HOST`, `KWIM_FALKOR_HOST`, `KWIM_RMQ_*`,
     `KWIM_EMBEDDER_URL`, `OTEL_*`, ...): plain env in `k8s/kwim-service.yaml`. Kept discrete
@@ -96,7 +96,7 @@ Configuration has two surfaces, split by concern:
   defaults**:
   - Shipped defaults live in `service/app/kwim.defaults.yaml` (baked into the image). You
     don't edit that file - it's the base layer and may change on upgrade.
-  - Point `KWIM_CONFIG` at your own YAML to override any subset; it is **deep-merged** over
+  - Point `KWIM_CONFIG` at your own YAML to override any subset; it is deep-merged over
     the defaults (set only the keys you care about; siblings are preserved).
   - Any single key can also be pinned by its `KWIM_*` env var (e.g. via the ConfigMap),
     which wins over both files - handy for a one-off without shipping a config file.

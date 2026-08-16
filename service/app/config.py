@@ -182,6 +182,8 @@ class Settings:
     fact_query_limit: int = _cfg("retrieval.fact_query_limit", "KWIM_FACT_QUERY_LIMIT", int, 20)
     rule_scan_limit: int = _cfg("retrieval.rule_scan_limit", "KWIM_RULE_SCAN_LIMIT", int, 200)
     code_slot_limit: int = _cfg("retrieval.code_slot_limit", "KWIM_CODE_SLOT_LIMIT", int, 8)
+    context_semantic_max_dist: float = _cfg(
+        "retrieval.context_semantic_max_dist", "KWIM_CONTEXT_SEMANTIC_MAX_DIST", float, 0.6)
 
     # --- Rebuild ---
     embed_batch: int = _cfg("rebuild.embed_batch", "KWIM_EMBED_BATCH", int, 32)
@@ -190,7 +192,7 @@ class Settings:
     rmq_exchange: str = _cfg("messaging.rmq_exchange", "KWIM_RMQ_EXCHANGE", str, "kwim")
     universe_graph: str = _cfg("messaging.universe_graph", "KWIM_UNIVERSE_GRAPH", str, "universe")
 
-    # --- Code graph (+T) distillation + resolution cascade ---
+    # --- Code graph distillation + resolution cascade ---
     cg_min_fan_in: int = _cfg("codegraph.min_fan_in", "KWIM_CG_MIN_FAN_IN", int, 5)
     cg_min_confidence: float = _cfg("codegraph.min_confidence", "KWIM_CG_MIN_CONFIDENCE", float, 0.75)
     cg_community_min_confidence: float = _cfg("codegraph.community_min_confidence", "KWIM_CG_COMMUNITY_MIN_CONFIDENCE", float, 0.5)
@@ -208,7 +210,7 @@ class Settings:
     cg_conf_fuzzy_multi: float = _cfg("codegraph.resolution.fuzzy_multi", "KWIM_CG_CONF_FUZZY_MULTI", float, 0.30)
     cg_reg_max_candidates: int = _cfg("codegraph.resolution.max_candidates", "KWIM_CG_REG_MAX_CANDIDATES", int, 20)
 
-    # --- Code graph (+T) source discovery (collections; env override = JSON) ---
+    # --- Code graph source discovery (collections; env override = JSON) ---
     cg_lang_by_ext: dict = field(default_factory=lambda: dict(_LANG_BY_EXT))
     cg_skip_dirs: frozenset = _SKIP_DIRS
     cg_ignore_files: tuple = _IGNORE_FILES

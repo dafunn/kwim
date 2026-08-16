@@ -36,8 +36,29 @@ def _graph_name(team: str) -> str:
     return f"kwim_{team}"
 
 
+# Shared :Fact read projection. `query_facts` (tag/structured) and `search_facts`
+# (semantic KNN) must return the identical row shape - both feed `_enrich_facts`
+# and the `Fact` model, and memory/context unions their results into one list.
+_FACT_FIELDS = ("id", "statement", "fact_type", "status", "created_at", "about",
+                "decay_class", "source_kind", "last_verified_at")
+
+
+def _fact_projection(alias: str) -> str:
+    return ", ".join(f"{alias}.{f}" for f in _FACT_FIELDS)
+
+
+def _fact_row(r: Any) -> dict:
+    """Map a `_fact_projection` result row to the standard fact dict."""
+    return {
+        "id": r[0], "statement": r[1], "fact_type": r[2], "status": r[3],
+        "created_at": str(r[4]), "about": list(r[5]) if r[5] else [],
+        "decay_class": r[6] or "slow", "source_kind": r[7] or None,
+        "last_verified_at": str(r[8]) if r[8] is not None else None,
+    }
+
+
 def _code_graph_name(team: str) -> str:
-    """The team's code graph (+T) - a sibling of kwim_<team>, deliberately separate.
+    """The team's code graph - a sibling of kwim_<team>, deliberately separate.
 
     rebuild.py replays commit_log into kwim_<team> and swaps it live; anything not
     in commit_log is wiped. The code graph's source of truth is the repo, not
@@ -72,7 +93,7 @@ _INIT_CYPHER = [
     f"OPTIONS {{dimension:{settings.embed_dim}, similarityFunction:'cosine'}}",
 ]
 
-# Code-graph schema (+T) - applied to kwim_<team>_code only, never kwim_<team>.
+# Code-graph schema - applied to kwim_<team>_code only, never kwim_<team>.
 # Node ids are content-stable qualified names (e.g. "repo:path::qualified.name") so
 # MERGE-on-id upserts are idempotent across incremental re-extraction.
 _CODE_INIT_CYPHER = [
@@ -213,18 +234,9 @@ class FalkorStore:
                 "ANY(qa IN $about WHERE toLower(a) = toLower(qa))) "
             )
             params["about"] = about
-        cypher += (
-            "RETURN f.id, f.statement, f.fact_type, f.status, f.created_at, f.about, "
-            "       f.decay_class, f.source_kind, f.last_verified_at LIMIT $limit"
-        )
+        cypher += f"RETURN {_fact_projection('f')} LIMIT $limit"
         res = await g.query(cypher, params)
-        return [
-            {"id": r[0], "statement": r[1], "fact_type": r[2], "status": r[3],
-             "created_at": str(r[4]), "about": list(r[5]) if r[5] else [],
-             "decay_class": r[6] or "slow", "source_kind": r[7] or None,
-             "last_verified_at": str(r[8]) if r[8] is not None else None}
-            for r in res.result_set
-        ]
+        return [_fact_row(r) for r in res.result_set]
 
     async def reaffirm_fact(self, team: str, fact_id: str) -> bool:
         """Stamp last_verified_at = now on a current :Fact. Non-destructive;
@@ -284,6 +296,100 @@ class FalkorStore:
             {"id": r[0], "statement": r[1], "status": r[2], "score": float(r[3])}
             for r in res.result_set
         ]
+
+    async def search_facts(
+        self, team: str, qvec: list[float], limit: int = 10,
+        about: list[str] | None = None, fact_type: str | None = None,
+    ) -> list[dict]:
+        """Semantic KNN over :Fact embeddings for the read path - Tier 1 retrieval
+        for Knowledge, and the counterpart to `query_facts`' structured filter.
+        `query_facts` answers "give me the facts tagged X"; this answers "what do we
+        know that relates to this?" when the caller cannot know the tag.
+
+        Deliberately separate from `query_similar_facts`, which serves the gate's
+        write-side dedup screen. That one scopes with AND-all, case-sensitive `about`
+        matching because it is deciding whether two proposals are the same fact;
+        this one mirrors `query_facts`' case-insensitive ANY-membership so `about`
+        means the same thing on both read paths. Keeping them apart means tuning
+        retrieval can never silently change what the gate rejects as a duplicate.
+
+        `score` is a cosine distance - lower = closer (identical -> 0.0), matching
+        `query_semantic`, so callers rank ascending.
+
+        Returns only status='current' facts. Facts with no embedding (committed
+        while the embedder was down - the gate fails open - or predating the index)
+        cannot match; `app.backfill_embeddings` is the repair path.
+        """
+        g = await self._graph(team)
+        params: dict[str, Any] = {"k": limit, "qvec": qvec}
+        filters: list[str] = []
+        if fact_type:
+            filters.append("f.fact_type=$fact_type")
+            params["fact_type"] = fact_type
+        if about:
+            filters.append(
+                "ANY(a IN f.about WHERE ANY(qa IN $about WHERE toLower(a) = toLower(qa)))")
+            params["about"] = about
+
+        if filters:
+            # Filter first, then score what survives. Going through the vector index
+            # here would apply the filter after the top-k cut, so a tag whose facts
+            # sit outside the global top-k would return nothing - the same top-k
+            # cliff `query_similar_facts`' scoped mode avoids.
+            res = await g.query(
+                "MATCH (f:Fact) WHERE f.status='current' AND f.embedding IS NOT NULL "
+                "AND " + " AND ".join(filters) + " "
+                f"RETURN {_fact_projection('f')}, "
+                "vec.cosineDistance(f.embedding, vecf32($qvec)) AS score "
+                "ORDER BY score ASC LIMIT $k",
+                params,
+            )
+        else:
+            try:
+                res = await g.query(
+                    "CALL db.idx.vector.queryNodes('Fact', 'embedding', $k, vecf32($qvec)) "
+                    "YIELD node, score WHERE node.status='current' "
+                    f"RETURN {_fact_projection('node')}, score "
+                    "ORDER BY score ASC LIMIT $k",
+                    params,
+                )
+            except Exception as exc:
+                # No vectors in the index yet (new team, or nothing embedded).
+                log.warning("falkor: search_facts failed (likely empty index): %s", exc)
+                return []
+        return [{**_fact_row(r), "score": float(r[len(_FACT_FIELDS)])} for r in res.result_set]
+
+    async def facts_missing_embedding(self, team: str, limit: int = 1000) -> list[dict]:
+        """Current facts with no `embedding` property - invisible to `search_facts`
+        until backfilled. Ordered by commit_seq so repeated runs are deterministic.
+        See `app.backfill_embeddings`."""
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (f:Fact) WHERE f.status='current' AND f.embedding IS NULL "
+            "RETURN f.id, f.statement ORDER BY f.commit_seq LIMIT $limit",
+            {"limit": limit},
+        )
+        return [{"id": r[0], "statement": r[1] or ""} for r in res.result_set]
+
+    async def set_fact_embedding(
+        self, team: str, fact_id: str, embedding: list[float],
+    ) -> bool:
+        """Attach an embedding to an existing :Fact in place (backfill path).
+
+        Non-destructive - touches only the vector property, leaving the statement,
+        status and every provenance edge alone. Reads back so a silent no-op (id
+        gone, write rejected) surfaces to the caller rather than counting as done.
+        """
+        g = await self._graph(team)
+        await g.query(
+            "MATCH (f:Fact {id:$id}) SET f.embedding=vecf32($embedding)",
+            {"id": fact_id, "embedding": embedding},
+        )
+        check = await g.query(
+            "MATCH (f:Fact {id:$id}) WHERE f.embedding IS NOT NULL RETURN f.id",
+            {"id": fact_id},
+        )
+        return bool(check.result_set)
 
     async def get_fact_provenance(self, team: str, fact_id: str) -> dict | None:
         """One fact + its immediate provenance edges (knowledge.facts/{id}).
@@ -613,7 +719,7 @@ class FalkorStore:
     async def retract_object(
         self, team: str, object_type: str, object_id: str, graph_name: str | None = None,
     ) -> None:
-        """Flip a committed :Fact/:Rule to status='retracted' (governed forgetting, C3).
+        """Flip a committed :Fact/:Rule to status='retracted' (governed forgetting).
 
         Mirrors the existing supersede path's `status='superseded'` flip.
         `query_facts`/`query_rules` filter on `status='current'`/`'approved'`, so a
@@ -626,7 +732,7 @@ class FalkorStore:
         self, team: str, object_type: str, object_id: str, by: str, at: str,
         graph_name: str | None = None,
     ) -> None:
-        """Stamp confirmed_by/confirmed_at on a committed :Fact/:Rule - no status change (C2)."""
+        """Stamp confirmed_by/confirmed_at on a committed :Fact/:Rule - no status change."""
         label = "Fact" if object_type == "fact" else "Rule"
         g = await self._graph(team, graph_name)
         await g.query(
@@ -756,7 +862,7 @@ class FalkorStore:
         return rows
 
     async def get_by_metadata(self, team: str, filters: dict[str, Any]) -> list[dict]:
-        """Metadata-only lookup (no vector). Returns items matching ALL filters."""
+        """Metadata-only lookup (no vector). Returns items matching all filters."""
         if not filters:
             return []
         g = await self._graph(team)
@@ -864,7 +970,35 @@ class FalkorStore:
         await g.query(
             "MATCH (e:Evidence) WHERE NOT ()-[:SUPPORTED_BY]->(e) DETACH DELETE e", {})
 
-    # --- Code graph (+T) -----------------------------------------------------
+    async def get_semantic_for_forget(
+        self, team: str, item_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a :SemanticItem for the forget path: its id and content. None if
+        not found. The semantic counterpart of `get_object_for_forget` - with no
+        evidence to collect, because semantic items are written directly by
+        `materialize_semantic` and are never SUPPORTED_BY anything."""
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (n:SemanticItem {id:$id}) RETURN n.id, n.content", {"id": item_id})
+        if not res.result_set:
+            return None
+        row = res.result_set[0]
+        return {"id": row[0], "content": row[1] or ""}
+
+    async def forget_semantic_node(self, team: str, item_id: str) -> bool:
+        """DETACH DELETE the :SemanticItem node (removes node and embedding).
+
+        Returns True if the node is gone afterwards. Unlike `forget_node` there is
+        no orphaned-:Evidence sweep: a semantic item carries no SUPPORTED_BY edges,
+        and unlike facts/rules it has no commit_log row either - the node is the
+        whole object, so this alone is a complete removal."""
+        g = await self._graph(team)
+        await g.query("MATCH (n:SemanticItem {id:$id}) DETACH DELETE n", {"id": item_id})
+        check = await g.query(
+            "MATCH (n:SemanticItem {id:$id}) RETURN n.id", {"id": item_id})
+        return not check.result_set
+
+    # --- Code graph -----------------------------------------------------------
     # All writes/reads target kwim_<team>_code via _code_graph(). The graph holds
     # structure/signatures/summaries/embeddings,never file bodies.
     # Node ids are content-stable qualified names so MERGE upserts are idempotent

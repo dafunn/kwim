@@ -35,6 +35,13 @@ GET  /v1/knowledge/query            read facts by structured filters
        ?fact_type= &status=current &about= &limit=
        -> { facts: [ {id, statement, fact_type, status, created_at} ] }
 
+GET  /v1/knowledge/search           semantic search over facts - free text, no tag needed
+       ?q=<text> &limit= &fact_type= &about=
+       -> [ {id, statement, ..., freshness, score} ]   # score = cosine distance, lower = closer
+       # ranked nearest-first, not re-sorted by freshness; 503 if the embedder is down
+       # (never a silent []). /query is the tag path; this is the "I don't know the
+       # tag" path. Facts with no embedding cannot match - see app.backfill_embeddings.
+
 GET  /v1/knowledge/facts/{id}       one fact + full provenance (edges)
        -> { fact: {...}, provenance: { supported_by:[...], proposed_by, supersedes } }
 
@@ -89,6 +96,10 @@ GET  /v1/memory/context             assemble working context for a turn
        ?session_id= &subject= &situation.<key>=<value> ...
        # session_id/subject are KWIM-interpreted; situation.* is the open
        # team-defined situation dict, forwarded to wisdom-rule matching.
+       # subject fills the knowledge slot two ways at once: exact `about` tag match
+       # first, then a semantic KNN over the same facts (distance-capped by
+       # retrieval.context_semantic_max_dist), deduped. coverage.knowledge splits the
+       # count into tag_n / semantic_n so callers can see which half answered.
        -> { recent:[...turns], knowledge:[...facts], wisdom:[...rules] }   # packed for the prompt
 
 GET  /v1/memory/semantic            semantic recall

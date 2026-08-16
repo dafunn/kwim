@@ -13,7 +13,7 @@ Decision policy (v1):
                  commit. Auto-commit after clear screen.
   - advisory:    evidence integrity + NELL-style distinct-session count;
                  auto-commit at session_count >= threshold, else review.
-  - constraint:  ALWAYS human review - enforcement policy is too consequential to
+  - constraint:  always human review - enforcement policy is too consequential to
                  auto-commit. Never auto-applied.
 
 Human review: proposals routed to "review" are persisted to
@@ -116,11 +116,13 @@ class Gate:
             return await self._reinforce(team, pid, proposal, body)
 
         # --- idempotent re-distill short-circuit ---
-        # A proposer-supplied stable object_id (the code distiller) whose node already
-        # exists is a no-op: that fact was committed and posted for review when first
-        # seen, so re-runs don't re-commit, re-notify, or re-queue it. This is what
-        # keeps a daily distill from flooding mattermost. It also respects a human
+        # A proposer-supplied stable object_id whose node already exists is a no-op:
+        # that fact was committed and posted for review when first seen, so re-runs
+        # don't re-commit, re-notify, or re-queue it. It also respects a human
         # retraction - a retracted node still "exists", so we won't resurrect it.
+        #
+        # Dormant: the code distiller supersedes-on-change. Kept for internal
+        # raw-bus proposers.
         stable_id = body.get("object_id")
         if ptype == "fact" and stable_id and await self._falkor.find_object(team, stable_id, "fact"):
             doc = {"id": pid, "object_type": "fact", "status": "noop",
@@ -166,6 +168,22 @@ class Gate:
             embedding=embedding,
         )
 
+    async def _embed_statement(self, statement: str | None) -> list[float] | None:
+        """Embed a fact statement for storage, or None if that is not possible.
+
+        Fail-open, like the screen: a fact that cannot be embedded still commits.
+        The cost of failing is a fact invisible to semantic search, which
+        `app.backfill_embeddings` repairs, so it is logged loudly enough to notice.
+        """
+        if self._embedder is None or not statement or not statement.strip():
+            return None
+        try:
+            return (await self._embedder.embed([statement]))[0]
+        except Exception as exc:
+            log.warning("gate: could not embed statement for commit, fact will be "
+                        "invisible to semantic search until backfilled: %s", exc)
+            return None
+
     async def _screen_fact(
         self, team: str, pid: str, ptype: str, body: dict[str, Any], proposal: dict[str, Any],
     ) -> tuple[dict[str, Any] | None, list[float] | None]:
@@ -185,13 +203,14 @@ class Gate:
             log.warning("gate: embedder unavailable for fact screen, skipping: %s", exc)
             return None, None
 
-        # Stable-id (code-distilled) facts use their object_id as the dedup key, not
-        # embedding similarity - so they skip the near-match screen and commit directly
-        # (still storing the vector for retrieval). Without this, structurally-distinct
-        # hubs with similar phrasing ("X is a call hub" / "Y is a call hub") read as
+        # A stable-id fact uses its object_id as the dedup key rather than embedding
+        # similarity, so it skips the near-match screen and commits directly (still
+        # storing the vector for retrieval). Without this, structurally-distinct hubs
+        # with similar phrasing ("X is a call hub" / "Y is a call hub") read as
         # near-matches, perpetually route to review, never commit, and re-queue every
         # run. handle()'s idempotent short-circuit already drops re-proposals of ones
         # that already committed; this lets the new ones through cleanly.
+        # Dormant along with that short-circuit.
         if body.get("object_id"):
             return None, vec
 
@@ -200,10 +219,11 @@ class Gate:
             about=body.get("about") or None,
             fact_type=body.get("fact_type"),
         )
-        # Exclude the explicit supersession target, and - for idempotent proposers
-        # with a stable object_id (the code distiller) - the fact's own prior node,
-        # so re-proposing the same structural fact updates it in place (MERGE-on-id
-        # in commit) instead of dup-rejecting or review-spamming against itself.
+        # Exclude the explicit supersession target - the live path, used by the code
+        # distiller, which proposes supersedes=<current id> when a statement changes -
+        # and, for a stable-id proposer, the fact's own prior node, so re-proposing the
+        # same structural fact updates it in place (MERGE-on-id in commit) instead of
+        # dup-rejecting or review-spamming against itself.
         excluded = {body.get("supersedes"), body.get("object_id")}
         neighbors = [n for n in neighbors if n["id"] not in excluded]
 
@@ -247,7 +267,7 @@ class Gate:
         # Only well-formed UUIDs may reach evidence_meta's `::uuid[]` cast - a
         # malformed id (e.g. a model that hallucinated or truncated an evidence id,
         # like "9f007edb") would throw InvalidTextRepresentation and crash the gate
-        # consumer, stalling ALL governance for every team. Canonicalize valid ids
+        # consumer, stalling all governance for every team. Canonicalize valid ids
         # (so case/format variants match the DB's id::text) and treat malformed ids
         # as unknown evidence -> problem -> review. Never send them to SQL.
         well_formed, malformed = _split_well_formed_uuids(deduped)
@@ -272,16 +292,20 @@ class Gate:
         surface) - identical in shape except gate_decision and reviewer
         provenance. extra_provenance (approved_by/approved_via, verify) is
         merged in without overriding the original proposer's attribution.
-        `embedding`: stored on the :Fact node when present; absent for
-        human-approved commits (no vector in pending row) until a rebuild re-embeds.
+        `embedding`: stored on the :Fact node when present. Callers that already
+        hold a vector (the auto-commit path, which screened with it) pass it in;
+        anyone else leaves it None and this method embeds the statement itself, so
+        no commit path can mint a fact that semantic search cannot see.
         """
-        # A stable, body-supplied object_id lets idempotent proposers (the code
-        # distiller) re-commit the same structural fact onto the SAME node via
-        # materialize_fact's MERGE-on-id, instead of minting a new uuid every run and
-        # accumulating duplicates. Agents can't reach this: FactProposal has no
-        # object_id field, so only internal raw-bus proposers can set it.
+        # A stable, body-supplied object_id lets an idempotent proposer re-commit the
+        # same structural fact onto one node via materialize_fact's MERGE-on-id,
+        # instead of minting a new uuid every run and accumulating duplicates. Agents
+        # can't reach this: FactProposal has no object_id field, so only internal
+        # raw-bus proposers can set it, and none does today (see handle()).
         object_id = body.get("object_id") or str(uuid.uuid4())
         payload, provenance = self._split(ptype, body, proposal)
+        if ptype == "fact" and embedding is None:
+            embedding = await self._embed_statement(payload.get("statement"))
         if extra_provenance:
             provenance = {**provenance, **extra_provenance}
         seq = await self._pg.append_commit(team, {
@@ -415,12 +439,12 @@ class Gate:
             log.warning("gate: Mattermost notify failed for proposal %s: %s", pid, exc)
 
     async def _notify_auto_commit(self, team: str, object_id: str, ptype: str, body: dict[str, Any]) -> None:
-        """Best-effort mattermost notification for a distiller auto-commit (C1).
+        """Best-effort mattermost notification for a distiller auto-commit.
 
         Distinct from `_notify_review`: this fires after commit (the object is
         already live), labeled "auto-committed (review optional)", and its buttons
         act on the committed `object_id` via `/v1/review/committed-action`
-        (Confirm/Retract, C2) rather than on a pending proposal_id. Never raises -
+        (Confirm/Retract) rather than on a pending proposal_id. Never raises -
         webhook failure is logged and otherwise ignored.
         """
         if not settings.mm_webhook_url:
@@ -539,7 +563,7 @@ class Gate:
         """Hard-forget an already-committed object - irreversibly remove it from every
         store (FalkorDB node + embedding, commit_log rows, non-shared source episodics).
 
-        Unlike retract_object (soft: status flip, replayable), this leaves NO tombstone,
+        Unlike retract_object (soft: status flip, replayable), this leaves no tombstone,
         so a rebuild cannot re-derive it. The shared-evidence guard preserves any episodic
         that also supports a different live object. Delegates to the shared forget core,
         which preflights Postgres DELETE and aborts before touching FalkorDB if the role

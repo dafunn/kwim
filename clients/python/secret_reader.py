@@ -12,6 +12,16 @@ import pathlib
 _SECRETS_DIR = pathlib.Path(os.environ.get("KWIM_SECRETS_DIR", "/secrets"))
 
 
+def secrets_dir() -> pathlib.Path:
+    """The directory secrets are read from - for error messages and preflights.
+
+    Callers that fail loudly on a missing secret should name this path in the
+    error: the usual cause is a mount at some other directory with
+    ``KWIM_SECRETS_DIR`` left unset.
+    """
+    return _SECRETS_DIR
+
+
 def read_secret(name: str) -> str:
     """Return the content of ``<secrets-dir>/<name>``, stripped.
 

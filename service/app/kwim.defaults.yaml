@@ -35,7 +35,21 @@ retrieval:
   rule_query_limit: 20          # rules packed into warm-start context
   fact_query_limit: 20          # facts packed into warm-start context
   rule_scan_limit: 200          # rule scans for /check and promotion source lookup
-  code_slot_limit: 8            # +T code warm-start slot size (small for weak models)
+  code_slot_limit: 8            # code-graph warm-start slot size (small for weak models)
+  # Cosine-distance cutoff for the semantic half of memory/context's knowledge slot.
+  # An unbounded KNN always returns its k nearest, however unrelated, so without a
+  # cutoff every warm start carries noise. Applies to memory/context only -
+  # knowledge/search returns scores and lets the caller judge.
+  #
+  # Calibrated against live canon facts and real agent questions.
+  # When the question names the entity - the common case - the right fact lands at
+  # 0.25-0.55 and the next-best is 0.63+, so 0.6 admits exactly one fact, the right
+  # one. Loosening to 0.85 to rescue entity-free paraphrases (which land at
+  # 0.70-0.79) costs more than it buys: it also admits a wrong fact on most named
+  # questions. The two ranges overlap, so no single threshold separates them -
+  # paraphrase recall needs a margin-relative rule, not a looser cutoff.
+  # Re-measure before changing this, and re-check if the embedder model changes.
+  context_semantic_max_dist: 0.6
 
 rebuild:
   embed_batch: 32               # episodic re-embed batch size during rebuild
