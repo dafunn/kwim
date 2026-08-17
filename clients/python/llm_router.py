@@ -8,8 +8,14 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from secret_reader import read_secret
+
+if TYPE_CHECKING:
+    # Type-checking only: the runtime import stays inside make_llm so the base
+    # client remains httpx-only and langchain is an extra, not a dependency.
+    from langchain_openai import ChatOpenAI
 
 # Off-cluster fallback only; in-cluster deployments override this via the
 # LITELLM_BASE_URL env (cluster DNS), and the eval harness points it at the

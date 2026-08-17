@@ -244,7 +244,7 @@ def _expect_unavailable(label, fn):
         fn()
     except kwim.KwimUnavailable:
         assert_true(label, True)
-    except Exception as exc:  # noqa: BLE001 - any other type is a failure
+    except Exception as exc:
         assert_true(f"{label} (raised {type(exc).__name__} instead)", False)
     else:
         assert_true(f"{label} (did not raise)", False)

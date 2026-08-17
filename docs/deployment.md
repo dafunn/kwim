@@ -30,7 +30,7 @@ The workload manifests are in `k8s/`. Apply them however you reconcile a cluster
 - Shared infra you can provision into: **PostgreSQL** (a superuser to create the
   DB/role), **RabbitMQ** (admin, to create a vhost/user), and a **container registry**.
 - A secrets mechanism that can land values into the pod. The manifests expect secret
-  files mounted at `/secrets/*`, loaded into the process env by `service/with-secrets.sh`
+  files mounted at `/secrets/*`, loaded into the process env by `services/api/with-secrets.sh`
   at startup (a secret manager that syncs into the pod works well, but anything that
   populates those files does). Nothing puts a secret value in a manifest.
 - For **Intelligence**: a model backend LiteLLM can route to - a local inference server
@@ -94,7 +94,7 @@ Configuration has two surfaces, split by concern:
   half-lives, retrieval/warm-start sizes, the code-graph resolution confidence cascade and
   discovery scope, ...) - load in precedence order **env var -> `KWIM_CONFIG` file -> shipped
   defaults**:
-  - Shipped defaults live in `service/app/kwim.defaults.yaml` (baked into the image). You
+  - Shipped defaults live in `services/api/kwim_api/kwim.defaults.yaml` (baked into the image). You
     don't edit that file - it's the base layer and may change on upgrade.
   - Point `KWIM_CONFIG` at your own YAML to override any subset; it is deep-merged over
     the defaults (set only the keys you care about; siblings are preserved).

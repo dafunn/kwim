@@ -12,10 +12,10 @@ stdout.
 import os
 
 from opentelemetry import trace
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
 
 def configure(service_name: str | None = None) -> None:

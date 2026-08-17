@@ -52,7 +52,7 @@ spec:
           command:
             - /app/with-secrets.sh
             - uvicorn
-            - app.main:app
+            - kwim_api.main:app
             - --host
             - 0.0.0.0
             - --port

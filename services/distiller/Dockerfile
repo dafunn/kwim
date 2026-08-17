@@ -17,9 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY clients/python/kwim.py clients/python/secret_reader.py clients/python/llm_router.py ./
 # otel helper - distiller-local, not part of the client package.
 COPY services/distiller/otel.py ./
-COPY services/distiller/app.py ./
+COPY services/distiller/distiller.py ./
 
 ENV PYTHONUNBUFFERED=1
 
 # Ephemeral job - runs to completion and exits.
-CMD ["python", "app.py"]
+CMD ["python", "distiller.py"]

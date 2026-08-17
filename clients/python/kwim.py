@@ -15,6 +15,7 @@ import logging
 import os
 
 import httpx
+
 from secret_reader import read_secret, secrets_dir
 
 log = logging.getLogger(__name__)

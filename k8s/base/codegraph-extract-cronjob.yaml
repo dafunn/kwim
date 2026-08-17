@@ -3,7 +3,7 @@
 # team's kwim_<team>_code graph, then distills structural facts through the gate.
 #
 # Pipeline per run: initContainer clones/fetches the repos into a cache PVC, then
-# the main container runs `app.codegraph.extract` + `app.codegraph.distill` for
+# the main container runs `kwim_api.codegraph.extract` + `kwim_api.codegraph.distill` for
 # each (team, repo). Reuses the kwim-service image (it ships app/codegraph) and the
 # kwim-service secret projection (db/rabbitmq/falkordb passwords via with-secrets.sh).
 #
@@ -154,9 +154,9 @@ spec:
                   for pair in $REPOS; do
                     name="${pair%%=*}"
                     echo "=== extract $name (team=$name) ==="
-                    python -m app.codegraph.extract --team "$name" --repo "$name" --path "/cache/$name"
+                    python -m kwim_api.codegraph.extract --team "$name" --repo "$name" --path "/cache/$name"
                     echo "=== distill $name ==="
-                    python -m app.codegraph.distill --team "$name" --repo "$name"
+                    python -m kwim_api.codegraph.distill --team "$name" --repo "$name"
                   done
               volumeMounts:
                 - { name: cache, mountPath: /cache, readOnly: true }
