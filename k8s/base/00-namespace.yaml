@@ -1,7 +1,6 @@
 ---
-# KWIM namespace. All KWIM infrastructure components share this namespace;
-# multi-team tenancy is logical (graph-per-tenant in FalkorDB, schema-per-team in
-# Postgres, vhost/routing in RabbitMQ), not namespace-per-team.
+# KWIM namespace, shared by all components. Teams are separated inside the stores
+# (see docs/ARCHITECTURE.md, "Tenancy").
 apiVersion: v1
 kind: Namespace
 metadata:

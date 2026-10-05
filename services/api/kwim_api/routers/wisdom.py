@@ -7,7 +7,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from ..auth import CurrentTeam, TeamContext
+from ..auth import CurrentTeam, TeamContext, require_capability
 from ..config import settings
 from ..models import (
     Accepted,
@@ -30,11 +30,7 @@ router = APIRouter(prefix="/v1/wisdom", tags=["wisdom"])
 @router.get("/rules", response_model=list[Rule])
 async def wisdom_rules(request: Request, team: TeamContext = CurrentTeam,
                        limit: int = 20):
-    """Applicable rules for a situation.
-
-    The situation is an open set of team-defined key/values passed as
-    ?situation.<key>=<value> params, AND-matched against rule situations.
-    """
+    """Approved rules matching every ?situation.<key>=<value> param."""
     situation = _situation_params(request)
     rows = await State.falkor.query_rules(team.team, situation, limit)
     return [
@@ -73,15 +69,9 @@ async def wisdom_propose(proposal: AdvisoryProposal | ConstraintProposal,
 
 @router.post("/check", response_model=CheckResult)
 async def wisdom_check(req: CheckRequest, team: TeamContext = CurrentTeam):
-    """Deterministic constraint enforcement - sync, no LLM, target <50ms.
-
-    Loads approved deterministic constraints (team + universe merged), evaluates
-    each rule's action_pattern regex against action["content"], and resolves
-    to one verdict:
-      - critical severity -> escalate (regardless of stored verdict).
-      - else highest-severity match's stored verdict wins.
-      - no match -> allow.
-    classifier-tier constraints are skipped in v1 (needs the embedder).
+    """Evaluate approved deterministic constraints (team and universe) against
+    action["content"]: a critical match escalates, otherwise the highest-severity
+    match's verdict wins, and no match allows. Classifier constraints are skipped.
     """
     # Load approved deterministic constraints only; empty list if none yet.
     all_rules = await State.falkor.query_rules(team.team, limit=settings.rule_scan_limit)
@@ -99,16 +89,13 @@ async def wisdom_check(req: CheckRequest, team: TeamContext = CurrentTeam):
             if re.search(r["action_pattern"], target):
                 matches.append(r)
         except re.error:
-            # Malformed stored pattern: skip rather than crash (shouldn't happen
-            # after gate validation, but be defensive on the hot path).
+            # Skip a stored pattern that does not compile.
             continue
 
     if not matches:
         return CheckResult(verdict="allow", check_tier="deterministic")
 
-    # Severity-wins resolution: critical always escalates; else highest severity's
-    # stored verdict wins. Ties broken by iteration order (stable after evidence_count
-    # sort from query_rules - higher evidence first, so more-trusted rule wins).
+    # Ties go to the rule with more evidence (query_rules' order).
     best = max(matches, key=lambda r: _SEVERITY_ORDER.get(r.get("severity", ""), 0))
     if _SEVERITY_ORDER.get(best.get("severity", ""), 0) >= _SEVERITY_ORDER["critical"]:
         verdict = "escalate"
@@ -124,26 +111,9 @@ async def wisdom_check(req: CheckRequest, team: TeamContext = CurrentTeam):
 
 @router.post("/promote/{rule_id}", status_code=status.HTTP_200_OK)
 async def wisdom_promote(rule_id: str, team: TeamContext = CurrentTeam):
-    """Promote an approved team rule to the shared universe graph. Human-only.
-
-    Gated by KWIM_PROMOTE_KEYS: the caller's key-id prefix must appear in that
-    comma-separated list. Proper RBAC is a later addition.
-
-    Creates a new universe object (new id) copying rule content with scope=universe
-    and provenance = the promotion record only. No team-private evidence crosses.
-    """
-    # --- capability gate ---
-    allowed_prefixes = [p.strip() for p in settings.promote_keys.split(",") if p.strip()]
-    if not allowed_prefixes:
-        # Fail-closed: promotion is a human-only, high-bar governance action that writes
-        # to the shared universe graph. Unless an operator has explicitly granted promote
-        # capability via KWIM_PROMOTE_KEYS, nobody promotes (an unset var must not mean
-        # "any team key, including agent keys, can push to universe").
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            detail="promotion not configured - set KWIM_PROMOTE_KEYS to grant promote capability")
-    if team.key_id not in allowed_prefixes:
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            detail="key not in KWIM_PROMOTE_KEYS - promotion not permitted")
+    """Copy an approved team rule into the universe graph as a new object, with the
+    promotion as its only provenance. Requires `promote`."""
+    require_capability(team, "promote")
 
     # Fetch the source rule from the team graph (must be approved).
     source_rows = await State.falkor.query_rules(team.team, limit=settings.rule_scan_limit)
@@ -215,29 +185,9 @@ async def wisdom_promote(rule_id: str, team: TeamContext = CurrentTeam):
 
 @router.post("/seed", status_code=status.HTTP_201_CREATED)
 async def wisdom_seed(body: SeedRule, team: TeamContext = CurrentTeam):
-    """Operator-gated direct commit of an approved rule to a team graph.
-
-    This is the escape hatch for human-curated seeding: it bypasses the
-    proposal/approval cycle and writes directly to FalkorDB with
-    status='approved'. Gated by the same KWIM_PROMOTE_KEYS capability
-    used for universe promotion (human-only, high-bar).
-
-    The rule idempotency key is the caller-supplied `id`. Overwrites on re-seed.
-    Mirrors the promote endpoint's commit path: append_commit needs `gate_decision`
-    and materialize_rule needs `commit_seq` (both hard keys) - pass both.
-    """
-    # --- capability gate (same as promote) ---
-    allowed_prefixes = [p.strip() for p in settings.promote_keys.split(",") if p.strip()]
-    if not allowed_prefixes:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail="seeding not configured - set KWIM_PROMOTE_KEYS to grant seed capability",
-        )
-    if team.key_id not in allowed_prefixes:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail="key not in KWIM_PROMOTE_KEYS - seeding not permitted",
-        )
+    """Commit an approved rule directly, bypassing review; keyed by the caller's
+    `id`, so re-seeding overwrites. Requires `promote`."""
+    require_capability(team, "promote")
 
     payload = body.model_dump()
     provenance = {"seeded_by": team.key_id,

@@ -33,8 +33,7 @@ router = APIRouter(prefix="/v1/memory", tags=["memory"])
 
 @router.post("/episodic", response_model=EventAccepted, status_code=status.HTTP_202_ACCEPTED)
 async def memory_episodic(event: EpisodicEvent, team: TeamContext = CurrentTeam):
-    # Durable write straight to Postgres, the system-of-record; also emit on the
-    # bus for any downstream consumers (e.g. future Wisdom distillation).
+    # Write to Postgres, then publish on the bus.
     event_id = await State.pg.append_episodic(team.team, event.model_dump())
     await State.bus.publish(team.team, "episodic", {"event_id": event_id, **event.model_dump()})
     return EventAccepted(event_id=event_id)
@@ -47,16 +46,9 @@ async def memory_episodic_window(
     order: str = "asc",
     team: TeamContext = CurrentTeam,
 ):
-    """Windowed, team-scoped read over episodic events on the (occurred_at, id) cursor.
-
-    `since_ts`/`since_id` form an exclusive composite cursor (the watermark); omit both
-    to read from the start (`order=asc`, default) or end (`order=desc`). `order=desc`
-    returns newest-first and treats the cursor as an exclusive upper bound - e.g.
-    `?event_type=distiller_watermark&limit=1&order=desc` fetches the single latest
-    watermark event in O(1) regardless of how many have accumulated. Used by the
-    distiller and other batch readers - a query, not a gate-write, so it's a plain
-    authenticated read.
-    """
+    """Windowed read over the team's episodic events. `since_ts`/`since_id` is an
+    exclusive cursor: a lower bound for `order=asc` (default), an upper bound for
+    `order=desc`; omit both to read from the start or end."""
     if (since_ts is None) != (since_id is None):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail="since_ts and since_id must be provided together")
@@ -98,17 +90,9 @@ async def memory_context(
     request: Request = ...,  # FastAPI auto-injects
     team: TeamContext = CurrentTeam,
 ):
-    """Assemble working context for a turn.
-
-    Wisdom enrichment: calls query_rules with the open situation dict
-    (?situation.<key>=<value> params) and packs approved rules, ranked by
-    evidence_count.
-
-    Knowledge enrichment: when `subject` is present, the knowledge slot is the union
-    of an exact `about` tag match and a semantic KNN over the same facts, so a
-    free-text subject the caller has no tag for still retrieves. Coverage markers
-    signal whether each slot was queried and non-empty (the absence trigger for
-    callers), and break the knowledge count down by how it was found.
+    """Assemble working context for a turn: knowledge for `subject` (tag matches,
+    then semantic matches), approved rules for the situation, recent events and
+    code, with coverage markers. See docs/DESIGN.md, "Retrieval".
     """
     situation = _situation_params(request)
     recent = await State.pg.recent_episodic(team.team, session_id)
@@ -148,10 +132,7 @@ async def memory_context(
             fallback=[], what=f"memory_context knowledge tag query (subject={subject!r})")
         tag_n = len(tag_rows)
 
-        # `subject` doubles as a tag and as free text. The tag hit is exact and
-        # high-precision, so it leads; the KNN is what answers a subject the caller
-        # could not have known the tag for. Union in that order, and the added
-        # retrieval can never cost an exact match.
+        # Tag matches first, then semantic matches not already present.
         sem_rows: list[dict] = []
         if qvec is not None:
             sem_rows = await best_effort(
@@ -159,9 +140,7 @@ async def memory_context(
                     team.team, qvec, limit=settings.fact_query_limit),
                 fallback=[], what=f"memory_context knowledge search (subject={subject!r})")
         seen = {r["id"] for r in tag_rows}
-        # Distance cutoff, and drop `score` on the way in: the context bundle is one
-        # flat list of facts, so every row must have the same shape whichever half
-        # it came from. The per-half counts live in coverage instead.
+        # Apply the distance cutoff and drop `score`, so every row has one shape.
         new_sem = [{k: v for k, v in r.items() if k != "score"} for r in sem_rows
                    if r["id"] not in seen
                    and r.get("score", 1.0) <= settings.context_semantic_max_dist]
@@ -170,18 +149,15 @@ async def memory_context(
 
     k_freshness = worst_freshness([f["freshness"] for f in knowledge]) if knowledge else "fresh"
 
-    # Code slot: a curated, repo-scoped warm-start map - signatures + summaries,
-    # never file bodies. Ranked by semantic match, tie-broken toward higher-confidence
-    # structure. Small by design for weak models.
+    # Code slot: signatures and summaries for the requested repos, ranked by
+    # semantic match, then structural confidence.
     code: list[dict] = []
     code_cov = {"covered": False, "n": 0, "queried": False, "repos_missing": [], "reason": None}
-    # `repos` is a Query(...) param; when the handler is called directly (tests) its
-    # default is the sentinel, not None - so gate on it actually being a list.
+    # Called directly (tests), `repos` is the Query default, not a list.
     if subject and isinstance(repos, list) and repos:
         code_cov["queried"] = True
-        # qvec is the shared `subject` embedding computed above; None means the
-        # embedder was down, and code_search degrades to structure-only ranking.
-        # Which requested repos are actually indexed? Unindexed -> deterministic signal.
+        # Without qvec (embedder down) code_search ranks by structure only.
+        # Requested repos that are not indexed are reported in coverage.
         indexed = await State.falkor.code_indexed_repos(team.team)
         missing = [r for r in repos if r not in indexed]
         present = [r for r in repos if r in indexed]
@@ -208,9 +184,7 @@ async def memory_context(
             "knowledge": {
                 "covered": len(knowledge) > 0, "n": len(knowledge),
                 "queried": knowledge_queried, "freshness": k_freshness,
-                # How the slot filled: exact `about` tag hits vs facts the semantic
-                # KNN added. semantic_n > 0 with tag_n == 0 is the case that used to
-                # come back empty.
+                # How many facts came from tag matches and how many from semantic search.
                 "tag_n": tag_n, "semantic_n": semantic_n,
             },
             "wisdom": {"covered": len(wisdom) > 0, "n": len(wisdom)},
@@ -256,25 +230,13 @@ async def memory_semantic(
 
 
 @router.post("/semantic", response_model=SemanticItem, status_code=status.HTTP_201_CREATED)
-async def memory_semantic_write(body: SemanticWrite, team: TeamContext = CurrentTeam):
-    """Explicit semantic write (deferred; direct write path).
-
-    Accepts content + optional metadata, embeds it, and writes to FalkorDB.
-    If `id` is omitted, generates a UUID.
-
-    TODO: this writes no Postgres record, so `kwim_api.rebuild` cannot replay these
-    items and a rebuild drops them. Persist the write, then replay it in
-    `rebuild._rebuild_semantic`.
-    """
+async def memory_semantic_write(body: SemanticWrite, request: Request,
+                                team: TeamContext = CurrentTeam):
+    """Write a semantic item directly through the gate (commit_log row, then the
+    node). Generates an id if none is given."""
     item_id = body.id or str(uuid.uuid4())
-    qvec = await State.embedder.embed([body.content])
-    item = {
-        "id": item_id,
-        "content": body.content,
-        "embedding": qvec[0],
-        "metadata": body.metadata,
-    }
-    await State.falkor.materialize_semantic(team.team, item)
+    await request.app.state.gate.commit_semantic(
+        team.team, item_id, body.content, body.metadata, proposed_by=team.key_id)
     return SemanticItem(id=item_id, content=body.content, score=0.0, metadata=body.metadata)
 
 

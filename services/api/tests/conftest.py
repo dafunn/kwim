@@ -1,17 +1,7 @@
 """Shared pytest fixtures + environment for the KWIM service test suite.
 
-WHY THIS FILE EXISTS
---------------------
-The old script-style tests each ran in their own process, so every file could
-set its own `KWIM_*` env vars and get a fresh `kwim_api.config.settings` /
-`kwim_api.auth._KEY_MAP` on import. Under pytest the whole suite shares one process
-and one import of those modules - both `settings` (a frozen dataclass) and the
-auth key map are built exactly once, at first import.
-
-So we set a superset of the env every module used, here, before anything
-imports `app.*`. pytest imports conftest.py ahead of the test modules in its
-directory, so this runs first and the singletons are built with all keys/tunables
-present.
+`settings` and the auth key map are built once, on first import, so this sets the
+environment every test module needs before anything imports kwim_api:
 
   - api keys (union of every key the suite authenticates with):
       devkey   -> acme      (key_id "devkey")  general + review-capable
@@ -19,9 +9,6 @@ present.
       otherkey -> otherteam (key_id "otherk")  neither promote nor review
   - promote/review allowlists are keyed on the 6-char key_id prefix.
   - gate tunables match what test_gate asserts against.
-
-`pythonpath = .` in pytest.ini puts the service root on sys.path, so `import app`
-resolves without the per-file sys.path.insert hacks.
 """
 import os
 
@@ -33,8 +20,7 @@ os.environ["KWIM_MM_ACTION_SECRET"] = "topsecret"
 os.environ["KWIM_GATE_VERIFY"] = "1"
 os.environ["KWIM_GATE_DUP_DIST"] = "0.05"
 os.environ["KWIM_GATE_REVIEW_DIST"] = "0.25"
-# OTEL must start unconfigured so test_otel's "no-op when endpoint unset" phase is
-# meaningful (it installs a real provider itself, in-process, in part 2).
+# test_otel needs OTEL unconfigured at the start.
 os.environ.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
 os.environ.pop("OTEL_SERVICE_NAME", None)
 
@@ -45,12 +31,33 @@ import pytest
 def client():
     """A TestClient over the real FastAPI app.
 
-    Instantiated without `with`, so the lifespan (which would open real DB/broker
-    connections) never runs - tests wire `kwim_api.runtime.State.*` and `app.state.gate`
-    to fakes themselves, via the monkeypatch-based fixtures in each module.
+    Created without `with`, so the lifespan does not run; tests set
+    `kwim_api.runtime.State.*` and `app.state.gate` to fakes.
     """
     from fastapi.testclient import TestClient
 
     from kwim_api.main import app
 
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_key_cache():
+    """auth.py's key-resolution cache is a module-level dict, not per-request
+    state, so it is cleared around every test."""
+    from kwim_api.auth import invalidate_key_cache
+
+    invalidate_key_cache()
+    yield
+    invalidate_key_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_admin_login_rate_limit():
+    """routers/admin.py's failed-login counters are a module-level dict for the
+    reason as the key cache, so they are cleared around every test."""
+    from kwim_api.routers.admin import _failures
+
+    _failures.clear()
+    yield
+    _failures.clear()

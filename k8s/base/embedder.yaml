@@ -1,7 +1,6 @@
 ---
-# Embedder service - CPU-only TEI workload serving all-MiniLM-L6-v2 (384-d).
-# Stateless, not node-pinned. The model is baked into the image; the running
-# pod needs DNS only (no HF Hub egress).
+# Embedder: TEI on CPU serving all-MiniLM-L6-v2 (384 dimensions), model in the
+# image, no Hugging Face Hub access.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,21 +27,16 @@ spec:
         - name: embedder
           # Bare image name; set registry + tag via the `images:` transformer in your overlay.
           image: kwim-embedder:latest
-          # Override the image CMD to add --auto-truncate: all-MiniLM-L6-v2 caps at
-          # 256 tokens and TEI rejects longer inputs by default (500). Some stored
-          # docs run longer than that - truncate the embedding instead of erroring.
-          # (Full text is still stored as :SemanticItem.content; long docs are
-          # fetched by metadata, not vector search, so a truncated embedding is
-          # acceptable.)
+          # --auto-truncate: embed the first 256 tokens of longer inputs instead of
+          # rejecting them. See docs/DESIGN.md, "Semantic memory".
           args:
             - --model-id
             - /models/all-MiniLM-L6-v2
             - --auto-truncate
           env:
             - { name: HF_HUB_OFFLINE, value: "1" }
-            # Trace propagation - TEI's native OTLP/gRPC exporter; note the http://
-            # scheme (TEI's gRPC client requires it). Unset by default; set the OTLP
-            # endpoint in your overlay to enable.
+            # OTLP endpoint for TEI's gRPC exporter (needs the http:// scheme); unset
+            # by default.
             - { name: OTLP_ENDPOINT, value: "" }
             - { name: OTLP_SERVICE_NAME, value: "kwim-embedder" }
           ports:

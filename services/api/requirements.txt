@@ -3,6 +3,7 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 PyYAML==6.0.2                   # layered tunables config (app/config.py + kwim.defaults.yaml)
 psycopg[binary]==3.2.3          # Postgres: episodic + commit_log
+psycopg-pool==3.2.8             # Postgres connection pool (reconnects after a server restart)
 falkordb==1.0.10                # FalkorDB graph + vector + working-memory TTL (Redis protocol)
 aio-pika==9.5.4                 # RabbitMQ publish/consume on the /kwim vhost
 httpx==0.28.1                    # Embedder HTTP client (TEI)

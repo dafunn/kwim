@@ -1,11 +1,5 @@
-"""Bus consumer that embeds episodic events carrying text into :SemanticItem nodes.
-
-Mirrors the gate pattern: durable queue, in-process, started from lifespan.
-For each episodic event with a non-empty `text` field, we embed it and write a
-:SemanticItem to the team's graph. Idempotent on event_id + MERGE.
-
-Embed-failure handling: the durable record is already in Postgres, so on
-embedder error we log and ack. A backfill/re-embed job is the recovery path.
+"""Bus consumer that embeds episodic events carrying text into :SemanticItem
+nodes, keyed by event id. See docs/DESIGN.md, "Semantic memory".
 """
 import json
 import logging
@@ -67,8 +61,7 @@ class SemanticConsumer:
         try:
             vectors = await self._embedder.embed([text])
         except Exception:
-            # Embedder failure: log and ack. Durable source is in Postgres;
-            # recovery is a backfill job (deferred).
+            # Log and acknowledge; a rebuild re-derives the item.
             logger.exception("semantic_consumer: embedder failed for event_id=%s", event_id)
             return
 

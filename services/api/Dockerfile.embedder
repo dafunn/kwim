@@ -7,7 +7,7 @@
 # running pod loads the model from disk with zero HF Hub access (DNS only).
 
 # --- Stage 1: download the model (build-time only, has egress) ---
-# python:3.x-slim installs Python into /usr/local and is NOT PEP 668
+# python:3.x-slim installs Python into /usr/local and is not PEP 668
 # "externally managed", so pip install works without any override.
 FROM python:3.11-slim AS downloader
 RUN pip install --no-cache-dir huggingface-hub==0.25.0

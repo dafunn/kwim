@@ -1,8 +1,6 @@
 """Post-index: Louvain community detection over the CALLS graph.
 
-Cohesive call-clusters become module-like communities (MEMBER_OF edges), backing
-get_architecture's "what are the modules" view.
-Uses networkx's built-in Louvain (worker-only dependency, not in the request path).
+Call clusters become communities (MEMBER_OF edges), used by get_architecture.
 """
 from __future__ import annotations
 
@@ -15,8 +13,8 @@ def detect_communities(
     call_edges: list[tuple[str, str, float]], min_confidence: float | None = None,
 ) -> dict[str, int]:
     """call_edges: (caller_qn, callee_qn, confidence). Returns {function_qn:
-    community_id}. Low-confidence edges are excluded so fuzzy guesses don't merge
-    unrelated clusters. `min_confidence` defaults to settings.cg_community_min_confidence."""
+    community_id}. Edges below `min_confidence` (default
+    settings.cg_community_min_confidence) are excluded."""
     if min_confidence is None:
         min_confidence = settings.cg_community_min_confidence
     g = nx.Graph()

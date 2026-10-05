@@ -114,6 +114,10 @@ to gate the high-bar operations, which is the shape tool authorization wants.
 
 ## Documentation
 
+- [Architecture](docs/ARCHITECTURE.md) - the components, where they run, and how data
+  moves between them.
+- [Design](docs/DESIGN.md) - how the mechanisms work and why: the commit log, the gate,
+  forget, retrieval, identity, the admin API.
 - [The contract](docs/contract.md) - the HTTP/JSON surface every agent codes against,
   and the one thing to read if you are integrating.
 - [Data model](docs/data-model.md) - what is stored where, and why.
@@ -126,8 +130,8 @@ to gate the high-bar operations, which is the shape tool authorization wants.
 
 | Path | What's in it |
 |------|--------------|
-| `service/` | The kwim-service - FastAPI app, the Postgres and FalkorDB stores, the gate, freshness/decay, graph rebuild, and the code-graph extractor. Plus its tests. |
-| `services/` | The distiller - a scheduled job that reads a team's episodic events, extracts durable learnings from them, and proposes those back through the gate like any other client. |
+| `services/api/` | The kwim-service - FastAPI app, the Postgres and FalkorDB stores, the gate, freshness/decay, graph rebuild, the admin API, and the code-graph extractor. Plus its tests. |
+| `services/distiller/` | The distiller - a scheduled job that reads a team's episodic events, extracts durable learnings from them, and proposes those back through the gate like any other client. |
 | `clients/` | The Python client agents use to reach the kwim-service, plus model routing and secret reading. |
 | `db/` | Per-team schema template and rendered SQL. |
 | `k8s/` | Example Kubernetes manifests for running it. |

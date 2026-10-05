@@ -1,7 +1,6 @@
 """LLM factory for the KWIM Intelligence inference gateway (LiteLLM).
 
-Routes all agent inference through LiteLLM - ChatOpenAI-compatible client,
-base URL and key driven by env.
+A ChatOpenAI client with base URL and key from the environment.
 """
 
 from __future__ import annotations
@@ -13,23 +12,18 @@ from typing import TYPE_CHECKING
 from secret_reader import read_secret
 
 if TYPE_CHECKING:
-    # Type-checking only: the runtime import stays inside make_llm so the base
-    # client remains httpx-only and langchain is an extra, not a dependency.
+    # Imported at run time inside make_llm; langchain is an optional extra.
     from langchain_openai import ChatOpenAI
 
-# Off-cluster fallback only; in-cluster deployments override this via the
-# LITELLM_BASE_URL env (cluster DNS), and the eval harness points it at the
-# gateway. No environment-specific address is baked in - set LITELLM_BASE_URL.
+# Default when LITELLM_BASE_URL is unset.
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://localhost:4000/v1")
 
 
 def _env_tags() -> dict[str, str]:
     """Deployment-declared spend tags from ``LITELLM_TAGS``.
 
-    Format is a comma-separated ``key:value`` list, e.g.
-    ``LITELLM_TAGS=host:host1,cluster:us-east``. Lets a deployment attribute
-    spend by whatever groupings it cares about (or none) without a code change;
-    KWIM attaches the tags but ascribes no meaning to them.
+    A comma-separated ``key:value`` list, e.g.
+    ``LITELLM_TAGS=host:host1,cluster:us-east``.
     """
     out: dict[str, str] = {}
     for part in os.environ.get("LITELLM_TAGS", "").split(","):
@@ -42,10 +36,8 @@ def _env_tags() -> dict[str, str]:
 def _litellm_tags(agent: str | None, tags: Mapping[str, str] | None) -> str | None:
     """Build the comma-separated ``x-litellm-tags`` value.
 
-    ``agent`` is the calling service - a grouping-neutral infra dimension.
-    ``tags`` is an open set of caller-defined ``key:value`` groupings; the
-    factory attaches whatever it is given and ascribes no meaning to them. A
-    caller wanting per-cluster accounting passes ``{"cluster": ...}``.
+    ``agent`` is the calling service; ``tags`` are caller-defined ``key:value``
+    pairs, passed through unchanged.
     """
     out: list[str] = []
     if agent:
@@ -59,10 +51,8 @@ def _litellm_tags(agent: str | None, tags: Mapping[str, str] | None) -> str | No
 def resolve_model(model: str | None = None) -> str:
     """Resolve the effective model name from config - never hardcoded.
 
-    Explicit ``model`` wins; otherwise the deployment's ``DEFAULT_LLM_MODEL``.
-    Raises ``RuntimeError`` if neither is set - the model must be configured,
-    never silently defaulted. Callers pass ``os.environ.get("<SVC>_MODEL")``
-    (which may be None) and let this resolve it.
+    ``model`` if given, else ``DEFAULT_LLM_MODEL``; raises ``RuntimeError`` if
+    neither is set.
     """
     resolved = model or os.environ.get("DEFAULT_LLM_MODEL")
     if not resolved:
@@ -82,22 +72,10 @@ def make_llm(
 ) -> ChatOpenAI:
     """Return a ChatOpenAI pointed at the LiteLLM gateway.
 
-    Key resolution: when ``LLM_API_KEY_SECRET`` is set, that secret is used
-    directly (cluster path - the manifest sets it). Otherwise falls back to
-    ``litellm-key`` (a team virtual key). Each consuming deployment sets
-    ``LLM_API_KEY_SECRET`` to its own team's key secret.
-
-    ``agent`` (arg or ``KWIM_AGENT``) plus any caller-supplied ``tags``, merged
-    with deployment-declared ``LITELLM_TAGS``, are emitted as the
-    ``x-litellm-tags`` header (``agent:<agent>[,<key>:<val>...]``), which LiteLLM
-    records in LiteLLM_SpendLogs / LiteLLM_DailyTagSpend for per-agent and
-    per-grouping token + cost tracking and audit attribution. Call-site ``tags``
-    win over ``LITELLM_TAGS`` on key collision. KWIM ascribes no meaning to the
-    grouping keys - a team defines its own (location, cluster, ...) or none.
-
-    The httpx client used internally by langchain-openai is instrumented by
-    otel.py at startup, so outbound requests will carry a traceparent header
-    if the OTel SDK is initialised before this is called.
+    The key is the secret named by ``LLM_API_KEY_SECRET``, else ``litellm-key``.
+    ``agent`` (or ``KWIM_AGENT``) and ``tags``, merged over ``LITELLM_TAGS``, are
+    sent as the ``x-litellm-tags`` header (``agent:<agent>[,<key>:<val>...]``) for
+    spend attribution.
     """
     model = resolve_model(model)
     if agent is None:

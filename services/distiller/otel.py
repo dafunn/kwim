@@ -1,12 +1,7 @@
-"""OTel SDK initialisation for KWIM LangGraph services.
+"""OpenTelemetry setup for the distiller. Call configure() once at startup.
 
-Call configure() once at application startup, before any LLM calls are made.
-
-If OTEL_EXPORTER_OTLP_ENDPOINT is set, spans are exported via OTLP to the
-collector - gRPC, OTLPSpanExporter() reads the endpoint from the env itself.
-Otherwise falls back to the original ConsoleSpanExporter (stdout JSON -> promtail -> Loki),
-so a service with no collector configured doesn't spam OTLP-export errors to
-stdout.
+Spans go to OTLP over gRPC when OTEL_EXPORTER_OTLP_ENDPOINT is set, and to stdout
+otherwise.
 """
 
 import os

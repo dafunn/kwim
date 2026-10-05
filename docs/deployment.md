@@ -51,28 +51,48 @@ The order matters: each step provisions substrate the next depends on.
 4. **Universe schema** (once per cluster). The shared cross-team `universe` schema
    (promoted, globally-approved Wisdom). FalkorDB's `kwim_universe` graph auto-creates on
    first write. (Schema shape: `db/`.)
-5. **Deploy the workloads.** Apply `k8s/` (see `k8s/kustomization.yaml`): FalkorDB,
+5. **Admin schema + first operator** (if you run the admin console). Apply
+   `db/admin-schema.sql` as the application role, then create the first operator
+   with `python -m kwim_api.admin_bootstrap --username <name>` (see
+   `operations.md`). The console cannot create its own first account.
+
+   Re-apply the schema on every deploy that changes it, not once at bring-up. It
+   is idempotent, so applying it unchanged is a no-op; wrap it in your deploy
+   automation rather than running it from memory.
+
+   `CREATE TABLE IF NOT EXISTS` adds a new table on a re-apply but is a no-op on
+   one that already exists, so a new column or a widened CHECK needs a retrofit
+   block in `db/admin-schema.sql` (its header states the convention).
+
+   The service starts without this schema and keeps authenticating teams from
+   `KWIM_API_KEYS`; the admin routes return 503 until it exists.
+6. **Deploy the workloads.** Apply `k8s/` (see `k8s/kustomization.yaml`): FalkorDB,
    kwim-service, embedder, LiteLLM, the code-graph CronJob, and network policies. Your
    secrets mechanism materializes `/secrets`; `with-secrets.sh` loads them.
-6. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
+7. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
    goes into `promote-keys`, which gates `/wisdom/promote`, `/wisdom/seed`, and review.
-7. **Provision your first team** (once per team). Create the per-team Postgres schema from
-   the template in `db/` (`<team>.episodic_events` + `<team>.commit_log`); the team's
-   FalkorDB graph (`kwim_<team>`) auto-creates on first write.
-8. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
-9. **(Optional) the code graph.** Set `REPOS` in `k8s/codegraph-extract-cronjob.yaml`
+8. **Provision your first team** (once per team). Two doors, same template: apply the
+   Postgres schema from `db/team-schema.sql.j2` yourself (`<team>.episodic_events` +
+   `<team>.commit_log`; the team's FalkorDB graph `kwim_<team>` auto-creates on first
+   write), or - if you run the admin console (step 5) - `POST /v1/admin/teams` with
+   `{team, display_name?}`, which applies the same template, initializes the graph
+   immediately rather than waiting for first write, and writes the console's
+   `kwim_admin.teams` record in the same call. A schema provisioned the first way
+   before the console existed can be registered with it later via
+   `POST /v1/admin/teams/{team}/adopt` (see `operations.md` -> "Add a team").
+9. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
+10. **(Optional) the code graph.** Set `REPOS` in `k8s/codegraph-extract-cronjob.yaml`
    as `name=owner/repo` pairs where the name is also the team the repo distills into
    (each repo gets its own `kwim_<name>_code` graph and proposes architecture facts into
    its own team's K/W). A daily CronJob runs it; trigger a one-off by creating a Job from
    the CronJob template. See `docs/operations.md` -> "add a repo".
-10. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
+11. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
     service then posts every proposal to a Mattermost channel with Approve / Reject / Forget
     buttons.
 
 ## Verify
 
-- `kwim-service` is Running and `/health` is green; LiteLLM `/loaded` returns the
-  backend's loaded model.
+- `kwim-service` is Running and `/health` is green.
 - A team API key can `POST /v1/knowledge/propose` and the fact appears via
   `GET /v1/knowledge/facts`.
 - `GET /v1/memory/context?subject=...` returns a warm-start bundle with coverage markers.

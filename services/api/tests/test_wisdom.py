@@ -1,11 +1,7 @@
 """Pure-logic tests for the Wisdom gate decision paths and wisdom.check matcher.
 
-These tests cover only in-process logic (no external services - no FalkorDB,
-Postgres, or RabbitMQ).
-
-The _decide / _check logic below is copied from gate.py and main.py; any drift
-between the copy and the real code is with the test, not a contract violation.
-(The end-to-end gate paths are exercised in test_gate.py.)
+In-process logic only. _decide and _check below are copies of the gate's and the
+router's logic; the real gate paths are tested in test_gate.py.
 """
 import re
 from typing import Any

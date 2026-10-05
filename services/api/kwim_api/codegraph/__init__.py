@@ -4,5 +4,5 @@ Ports the patterns of DeusData/codebase-memory-mcp (MIT) into Python, Python-fir
 tree-sitter structure extraction + a confidence-scored call-resolution cascade,
 Louvain communities, and xxhash incremental re-indexing.
 
-The graph holds structure/signatures/summaries/embeddings, never file bodies.
+The graph holds structure, signatures, summaries, and embeddings, never file bodies.
 """

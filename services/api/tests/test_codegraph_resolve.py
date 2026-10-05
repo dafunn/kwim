@@ -1,7 +1,7 @@
 """Code-graph parse + resolution cascade tests.
 
-Validates the confidence cascade resolves to the expected target + strategy on
-controlled fixtures, and that ambiguous calls land in the low-confidence tier.
+The cascade resolves each fixture call to the expected target and strategy, and
+ambiguous calls land in the low-confidence tier.
 """
 from kwim_api.codegraph import parse, resolve
 
@@ -71,8 +71,7 @@ def test_resolution_strategies():
 
 
 def test_ambiguous_is_low_confidence():
-    # Two classes define method `m`; a bare `obj.m()` is unresolvably ambiguous and
-    # must land in the low-confidence suffix tier (never high-confidence).
+    # Two classes define `m`, so `obj.m()` resolves only at low confidence.
     files = {
         "a.py": "class A:\n    def m(self):\n        return 1\n",
         "b.py": "class B:\n    def m(self):\n        return 2\n",

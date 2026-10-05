@@ -22,9 +22,9 @@ CREATE TABLE IF NOT EXISTS <team>.commit_log (
     seq           bigserial   PRIMARY KEY,                 -- monotonic replay order
     id            uuid        NOT NULL DEFAULT gen_random_uuid(),
     committed_at  timestamptz NOT NULL DEFAULT now(),
-    object_type   text        NOT NULL CHECK (object_type IN ('fact','rule')),
+    object_type   text        NOT NULL CHECK (object_type IN ('fact','rule','semantic')),
     object_id     text        NOT NULL,                    -- the K fact / W rule (text, not uuid: seed path uses human-readable ids)
-    operation     text        NOT NULL CHECK (operation IN ('commit','deprecate','reinforce')),
+    operation     text        NOT NULL CHECK (operation IN ('commit','deprecate','reinforce','retract','confirm','amend')),
     payload       jsonb       NOT NULL DEFAULT '{}'::jsonb, -- object content -> recreate the node
     provenance    jsonb       NOT NULL DEFAULT '{}'::jsonb, -- edges -> recreate the relationships
     proposed_by   text,                                    -- agent id
@@ -42,17 +42,40 @@ Operations (supersession is encoded in provenance, not a separate op):
 - `deprecate` - a rule moves to `deprecated` (object_id only; W lifecycle).
 - `reinforce` - bump a rule's `evidence_count` with new supporting evidence
   (object_id + the evidence refs in payload). The advisory-rule confidence path.
+- `retract` / `confirm` - human post-hoc review of a committed object (status only).
+- `amend` - replace an object's content in place. `payload` carries the new values
+  for the amended fields only; `provenance` carries
+  `{amended_by, amended_via, previous_payload}`, where `previous_payload` holds
+  those same fields' prior values. The node is overwritten, so that is the only
+  surviving record of what it said before.
+
+  Amend is content-only: `status`, `created_at`, `scope`, `evidence_count`, and
+  every edge are out of reach, each having its own operation. Amendable fields are
+  `statement`/`fact_type`/`about`/`decay_class` for a fact,
+  `situation`/`approach` plus the constraint fields for a rule, and
+  `content`/`metadata` for a semantic item. An object that is not live
+  (fact not `current`, rule not `approved`) is refused, since amending something
+  already superseded would edit a version the chain has moved past.
+
+  Amend is not supersede. Supersede mints a new object with a `SUPERSEDES` edge and
+  keeps the old text visible - the right shape for a change of belief. Amend
+  overwrites - the right shape for a correction that should not mint a version.
 
 `payload` shape (by object_type):
+- semantic: `{content, metadata}` - a directly-written `:SemanticItem`
+  (`POST /v1/memory/semantic`). Only this path is logged; bus-fed items keyed by
+  episodic event id are re-derived from `<team>.episodic_events` instead, so
+  logging them would duplicate a record replay already has. `gate_decision` is
+  `auto_committed`: a semantic write passes through no screening, and the column
+  admits no value meaning "ungoverned".
 - fact: `{statement, fact_type, valid_from}`
 - rule(advisory): `{rule_type:"advisory", situation, approach}`
 - rule(constraint): `{rule_type:"constraint", action_pattern, verdict, authority, severity, check_tier}`
   `action_pattern` is a regex string; `verdict` in `allow|deny|escalate`;
   `check_tier` in `deterministic|classifier` (how the check runs - structured/regex
-  vs. embedding+LLM; v1 builds `deterministic` only). `severity` is a free string
-  (`low|medium|high|critical` by convention). The enforcement-point design (where
-  `/check` is called from, beyond the tool boundary) is the part still open - not the
-  field schema.
+  vs. embedding+LLM; only `deterministic` is evaluated, and `classifier` constraints
+  are skipped by `/check`). `severity` is a free string (`low|medium|high|critical` by
+  convention).
 
 `provenance` shape: `{proposed_by:<agent>, supported_by:[<episodic_event_id>...],
 supersedes:<object_id?>, references:[<fact_id>...], about:[<entity_ref>...]}`. These
@@ -61,6 +84,27 @@ are exactly the edges to recreate in the graph.
 Why this is enough to rebuild the graph: every node's content is in `payload`,
 every node's edges are in `provenance`, and `seq` gives the order. Replay = for
 each row in `seq` order, upsert the node and its edges.
+
+---
+
+## 1.5 Postgres freshness state - `<team>.fact_verifications`
+
+```sql
+CREATE TABLE IF NOT EXISTS <team>.fact_verifications (
+    fact_id          text        PRIMARY KEY,
+    last_verified_at timestamptz NOT NULL DEFAULT now(),
+    verified_by      text
+);
+```
+
+The durable home for `last_verified_at`, which the `:Fact` node carries but the
+graph cannot retain across a rebuild. Written by `POST /v1/knowledge/facts/{id}/reaffirm`,
+read by the rebuild's reapply step, and deleted with the fact by `forget`.
+
+One row per fact, upserted - only the latest verification feeds freshness, so
+per-reaffirm history would grow without a consumer. Deliberately not `commit_log`
+rows: reaffirm asserts continued currency rather than a governed content change, and
+it runs often enough to bloat a log that is replayed in full on every rebuild.
 
 ---
 
@@ -138,11 +182,21 @@ Rebuild a team's graph from durable sources:
 3. Replay `<team>.commit_log` `ORDER BY seq`: for each row, upsert the `:Fact`/`:Rule`
    node from `payload` and create edges from `provenance`; apply `deprecate`/
    `reinforce` as status/`evidence_count` updates; mark `supersedes` targets
-   `superseded`.
-4. Re-embed semantic source text (whose durable copy lives in episodic/git) into
-   `:SemanticItem` + rebuild the vector index.
+   `superseded`. Each node's `created_at` is restored from the row's `committed_at`,
+   so replay preserves object age rather than restamping it to the rebuild time.
+4. Reapply `<team>.fact_verifications`: stamp `last_verified_at` onto each replayed
+   `:Fact` still `current`. Runs after step 3, since the nodes must exist first.
+5. Re-embed semantic source text (whose durable copy lives in episodic/git) into
+   `:SemanticItem` + rebuild the vector index. Directly-written items come from the
+   log in step 3 instead; that step runs first, so an episodic-derived item wins on
+   any id collision.
 
 Working memory is not rebuilt (ephemeral).
+
+Both timestamps matter because freshness is computed from
+`max(created_at, last_verified_at)`: without step 3's `committed_at` restore every
+fact would rebuild as brand new, and without step 4 a recently verified fact would
+revert to its creation age and read stale.
 
 ---
 

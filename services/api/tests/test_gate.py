@@ -251,15 +251,13 @@ async def test_screen_no_neighbors_commits():
 # 2b. Entity-scoped screening regression
 # ---------------------------------------------------------------------------
 
-# Realistic about sets share broad category refs; the screen must require all
-# proposal refs to be present in the candidate (not any shared ref).
+# The screen requires every proposal ref in the candidate, not any shared one.
 _HOSTA_ABOUT = ["host-a", "group-x", "site-a"]
 _HOSTB_ABOUT = ["host-b", "group-x", "site-a"]
 
 
 async def test_screen_entity_scoped_different_entities_both_commit():
-    # Distance ~0.018 is deep inside the reject range, but the candidate is about
-    # host-a while the proposal is about host-b -> not a duplicate candidate.
+    # Close enough to reject, but about host-a rather than host-b.
     falkor = _FakeFalkor(neighbors=[{
         "id": "fact-hosta-inv",
         "statement": "host-a is a group-x host at 10.0.0.10.",
@@ -534,7 +532,7 @@ async def test_commit_proposal_keeps_the_screens_vector_when_given_one():
 
 async def test_commit_proposal_fails_open_when_embedder_is_down():
     """A dead embedder must not block governance - the fact still commits, just
-    unembedded, and kwim_api.backfill_embeddings is the repair."""
+    without a vector."""
     falkor, embedder = _FakeFalkor(), _FakeEmbedder(raises=True)
     gate = _make_gate(falkor=falkor, embedder=embedder)
     body = {"statement": "Widgets ship sealed.", "fact_type": "product", "evidence": []}

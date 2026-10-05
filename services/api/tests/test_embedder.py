@@ -1,12 +1,7 @@
 """Tests for the TEI embedder client.
 
-Covers the one-to-one input/output guarantee `Embedder.embed` enforces. Drives the
-real client over a mock HTTP transport: the invariant lives in the client, and
-every other suite substitutes a fake Embedder that never reaches it.
-
-Callers pair the response with the input batch positionally - by `zip`
-(backfill_embeddings, rebuild) or by index (codegraph.extract) - and each of those
-forms drops the tail of a short response without error.
+`Embedder.embed` returns one vector per input or raises; driven over a mock HTTP
+transport.
 """
 import httpx
 import pytest
@@ -47,7 +42,7 @@ async def test_short_response_raises_instead_of_truncating():
 
 async def test_empty_response_raises():
     """`(await embed([x]))[0]` - the single-input form the gate and the
-    knowledge/code routers use - would raise a bare IndexError here."""
+    knowledge and code routers use."""
     e = _embedder(_responds([]))
     with pytest.raises(ValueError) as exc:
         await e.embed(["a"])

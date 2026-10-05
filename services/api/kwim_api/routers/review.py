@@ -1,8 +1,5 @@
-"""Human-review surface: REST + mattermost over <team>.pending_proposals.
-
-REST is first-class; the mattermost action callback (`/mm-action`) performs
-the same internal claim -> commit/reject flow as the REST approve/reject
-endpoints, just with a different reviewer-identity source and response shape.
+"""Human review over <team>.pending_proposals: REST and Mattermost buttons, both
+running the same claim -> commit/reject flow.
 """
 import hmac
 import logging
@@ -10,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from ..auth import CurrentTeam, TeamContext
+from ..auth import CurrentTeam, TeamContext, require_capability
 from ..config import settings
 from ..gate import summarize_proposal
 from ..models import PendingProposal, RejectRequest
@@ -22,29 +19,9 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/review", tags=["review"])
 
 
-def _require_review_key(team: TeamContext) -> None:
-    """Capability gate - mirrors KWIM_PROMOTE_KEYS (routers/wisdom.py wisdom_promote).
-
-    Fail-closed: an unset/empty KWIM_REVIEW_KEYS means nobody can review,
-    not "any team key can review."
-    """
-    allowed_prefixes = [p.strip() for p in settings.review_keys.split(",") if p.strip()]
-    if not allowed_prefixes:
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            detail="review not configured - set KWIM_REVIEW_KEYS to grant review capability")
-    if team.key_id not in allowed_prefixes:
-        raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            detail="key not in KWIM_REVIEW_KEYS - review not permitted")
-
-
 @router.get("/pending", response_model=list[PendingProposal])
 async def review_pending(limit: int = 50, team: TeamContext = CurrentTeam):
-    """Team-scoped read: any team key can read its own queue.
-
-    Reading your own team's pending proposals is no more sensitive than reading
-    your own knowledge/wisdom (already allowed by the team key). Approve/reject
-    stay gated by `_require_review_key` - that's the governance authority.
-    """
+    """The team's pending proposals; any team key may read them."""
     rows = await State.pg.list_pending(team.team, limit=limit)
     return [
         PendingProposal(
@@ -61,7 +38,7 @@ async def review_pending(limit: int = 50, team: TeamContext = CurrentTeam):
 
 @router.post("/{proposal_id}/approve")
 async def review_approve(proposal_id: str, request: Request, team: TeamContext = CurrentTeam):
-    _require_review_key(team)
+    require_capability(team, "review")
     row = await State.pg.claim_pending(team.team, proposal_id, "approved", team.key_id, "api")
     if row is None:
         await _raise_claim_failure(team.team, proposal_id)
@@ -76,7 +53,7 @@ async def review_approve(proposal_id: str, request: Request, team: TeamContext =
 
 @router.post("/{proposal_id}/reject")
 async def review_reject(proposal_id: str, body: RejectRequest = RejectRequest(), team: TeamContext = CurrentTeam):
-    _require_review_key(team)
+    require_capability(team, "review")
     row = await State.pg.claim_pending(
         team.team, proposal_id, "rejected", team.key_id, "api", body.reason)
     if row is None:
@@ -100,12 +77,8 @@ async def _raise_claim_failure(team: str, proposal_id: str) -> None:
 
 @router.post("/mm-action")
 async def review_mm_action(request: Request) -> dict[str, Any]:
-    """mattermost interactive-button callback.
-
-    Not behind current_team - mattermost has no team bearer key. Authenticated
-    by a shared secret embedded in the button's context (fail-closed: an unset
-    KWIM_MM_ACTION_SECRET means this endpoint always 403s).
-    """
+    """Mattermost button callback for pending proposals, authenticated by the
+    shared secret in the button (403 when KWIM_MM_ACTION_SECRET is unset)."""
     payload = await request.json()
     context = payload.get("context") or {}
 
@@ -136,9 +109,7 @@ async def review_mm_action(request: Request) -> dict[str, Any]:
         return {"update": {"message":
             f":white_check_mark: approved by @{user_name} - object {doc['object_id']}, seq {doc['seq']}"}}
 
-    # reject or forget - a pending proposal has no committed node, so both reject it
-    # (rejecting prevents commit). forget additionally hard-deletes the non-shared
-    # source episodics inline, so the garbage can't be re-derived on a rebuild.
+    # reject or forget: both reject; forget also deletes the unshared source events.
     row = await State.pg.claim_pending(team, proposal_id, "rejected", user_name, "mattermost")
     if row is None:
         return {"update": {"message": ":warning: proposal already resolved or not found"}}
@@ -174,12 +145,8 @@ def _forget_pending_message(user_name: str, evidence: list[str], result: dict[st
 
 @router.post("/committed-action")
 async def review_committed_action(request: Request) -> dict[str, Any]:
-    """mattermost interactive-button callback for committed objects.
-
-    Distinct from `/mm-action`: buttons here carry an `object_id`/`object_type`
-    (a committed graph node), not a `proposal_id` (a pending_proposals row).
-    Same hmac-secret auth as `/mm-action`.
-    """
+    """Mattermost button callback for committed objects (`object_id`,
+    `object_type`), authenticated like /mm-action."""
     payload = await request.json()
     context = payload.get("context") or {}
 
@@ -214,9 +181,7 @@ async def review_committed_action(request: Request) -> dict[str, Any]:
             return {"update": {"message": ":warning: object already retracted"}}
         return {"update": {"message": f":wastebasket: retracted by @{user_name} - object {object_id}"}}
 
-    # forget - irreversibly remove the committed object from every store, inline.
-    # The reviewer click is the confirmation; the shared-evidence guard still protects
-    # episodics that support other live objects (see gate.forget_object).
+    # forget: the click is the confirmation (see gate.forget_object).
     result = await gate.forget_object(team, object_id, user_name, "mattermost", object_type)
     if result["status"] == "not_found":
         return {"update": {"message": ":warning: object not found"}}
@@ -236,7 +201,7 @@ async def review_committed_action(request: Request) -> dict[str, Any]:
 @router.post("/committed/{object_id}/retract")
 async def review_committed_retract(object_id: str, request: Request, team: TeamContext = CurrentTeam):
     """REST parity for retraction - scriptable, not Mattermost-only."""
-    _require_review_key(team)
+    require_capability(team, "review")
 
     result = await request.app.state.gate.retract_object(team.team, object_id, team.key_id, "api")
     if result["status"] == "not_found":

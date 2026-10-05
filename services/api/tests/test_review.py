@@ -5,7 +5,7 @@ Covers:
   - the proposal summary builder (fact/advisory/constraint, truncation)
   - mm-action auth (secret check, fail-closed when unset, team identifier validation)
   - provenance merge (extra_provenance doesn't override proposed_by/learned_from/supported_by)
-  - regression: Gate._decide / Gate._split unchanged after the commit_proposal refactor
+  - regression: Gate._decide / Gate._split decision tables
 
 Auth/secret env come from conftest's superset:
   devkey -> acme (review-capable), otherkey -> otherteam (not), KWIM_MM_ACTION_SECRET=topsecret.
@@ -435,7 +435,7 @@ def test_provenance_merge():
 
 
 # ---------------------------------------------------------------------------
-# Regression - Gate._decide unchanged after the commit_proposal refactor
+# Regression - Gate._decide decision table
 # ---------------------------------------------------------------------------
 
 def test_decide_regression():

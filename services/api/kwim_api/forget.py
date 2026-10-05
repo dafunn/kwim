@@ -1,23 +1,6 @@
-"""Forget - governed hard-removal of facts/rules from memory.
+"""Forget: irreversibly remove facts and rules from every store. Used by the
+review surface's Forget button and by this CLI. See docs/DESIGN.md, "Forget".
 
-DESTRUCTIVE and IRREVERSIBLE. Completely removes governed objects (facts/rules)
-from every store - the FalkorDB node + its embedding, the Postgres commit_log rows,
-and the non-shared source episodic events - with no surviving tombstone, so a
-`rebuild` cannot re-derive them. Unlike the soft `retract` (status flip), this
-deletes data.
-
-Two callers share the core here:
-  - the API "Forget" button (`review.py` -> `gate.forget_object` /
-    `gate.forget_episodics`), which forgets one object inline on a reviewer click;
-  - this standalone CLI, for operator batch/one-off runs, dry-run by default with a
-    typed confirmation.
-
-Both paths keep the shared-evidence guard: an episodic that also supports an object
-not in the forget set is preserved (override with `--force-shared` / force_shared=True),
-and both preflight Postgres DELETE privilege before touching FalkorDB so a permission
-failure can't half-forget (node gone, commit_log left -> a rebuild re-derives it).
-
-Run (operator, privileged DB creds via the usual KWIM_* env / with-secrets.sh):
     python -m kwim_api.forget --team <team> --ids <id1,id2,...> [--commit]
     python -m kwim_api.forget --team <team> --select --fact-type code_hub \
         --statement-contains mcp-snapshot [--commit]
@@ -62,13 +45,12 @@ async def plan_forget(
 
 
 async def preflight(pg: PostgresStore, team: str) -> dict:
-    """Read-only check (no deletes) that the connected Postgres role can DELETE from
-    the team's commit_log + episodic_events. Assumes `pg` is already connected. Sets
-    `ok` so both the CLI dry-run and the inline forget can refuse a run that would
-    half-complete (FalkorDB deleted, Postgres rows left)."""
+    """Read-only check that the connected role can DELETE from the team's
+    commit_log, episodic_events and fact_verifications. Sets `ok`."""
     try:
         priv = await pg.delete_preflight(team)
-        priv["ok"] = bool(priv.get("commit_log") and priv.get("episodic"))
+        priv["ok"] = bool(priv.get("commit_log") and priv.get("episodic")
+                          and priv.get("verifications", True))
         return priv
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -77,26 +59,26 @@ async def preflight(pg: PostgresStore, team: str) -> dict:
 async def execute_forget(
     falkor: FalkorStore, pg: PostgresStore, team: str, plan: list[dict],
 ) -> dict:
-    """Apply a plan across both stores. Postgres deletes run per object after its
-    FalkorDB node is removed; callers must have confirmed `preflight().ok` first."""
-    n_nodes = n_commit = n_epis = 0
+    """Apply a plan: per object, delete the node, then its commit_log rows,
+    verification row and unshared episodics. Requires `preflight().ok`."""
+    n_nodes = n_commit = n_epis = n_verif = 0
     for p in plan:
         await falkor.forget_node(team, p["type"], p["id"])
         n_nodes += 1
         n_commit += await pg.delete_commit_log(team, p["id"])
+        if p["type"] == "fact":
+            n_verif += await pg.delete_verifications(team, [p["id"]])
         if p["episodics_to_delete"]:
             n_epis += await pg.delete_episodic(team, p["episodics_to_delete"])
-    return {"objects": n_nodes, "commit_log_rows": n_commit, "episodic_events": n_epis}
+    return {"objects": n_nodes, "commit_log_rows": n_commit, "episodic_events": n_epis,
+            "verification_rows": n_verif}
 
 
 async def forget_one(
     falkor: FalkorStore, pg: PostgresStore, team: str, object_id: str, *,
     object_type: str | None = None, force_shared: bool = False,
 ) -> dict:
-    """Inline hard-forget of a single committed object (the API Forget button).
-
-    Resolves + guards + preflights + deletes in one shot (no dry-run - the reviewer
-    click IS the confirmation). Returns:
+    """Forget one committed object (the review surface's Forget button). Returns:
       {"status": "not_found"}                       - no such object
       {"status": "preflight_failed", "preflight": ...} - role can't DELETE; nothing touched
       {"status": "forgotten", type, shared_skipped, objects, commit_log_rows, episodic_events}
@@ -117,11 +99,8 @@ async def forget_episodics(
     falkor: FalkorStore, pg: PostgresStore, team: str, episodic_ids: list[str], *,
     force_shared: bool = False,
 ) -> dict:
-    """Inline hard-forget of a rejected/uncommitted proposal's source episodics.
-
-    No graph node exists (nothing was committed), so this only deletes the episodic
-    events - after the same shared-evidence guard against committed objects, so an
-    event that also supports a live fact/rule is preserved. Returns:
+    """Forget the source episodics of an uncommitted proposal, keeping any that
+    support a live object. Returns:
       {"status": "no_delete", episodic_events: 0, shared_skipped}   - nothing to delete
       {"status": "preflight_failed", "preflight": ...}                - role can't DELETE
       {"status": "forgotten", episodic_events: N, shared_skipped}
@@ -218,11 +197,8 @@ async def _amain(args: argparse.Namespace) -> int:
                   "Supply privileged DB creds and retry.")
             return 1
 
-        # Confirmation - destructive + irreversible. Two paths:
-        #   --confirm-count N : non-interactive (playbooks/no-TTY) - proceed only if
-        #                       the plan size equals N the operator reviewed in the
-        #                       dry-run; a drift in the graph since then aborts.
-        #   otherwise         : interactive typed confirmation.
+        # --confirm-count N proceeds only if the plan still has N objects;
+        # otherwise an interactive typed confirmation.
         if args.confirm_count is not None:
             if len(plan) != args.confirm_count:
                 print(f"Count mismatch - plan has {len(plan)}, --confirm-count={args.confirm_count}. "

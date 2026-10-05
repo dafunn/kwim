@@ -1,11 +1,9 @@
 """Distiller - consolidates episodic traces into Knowledge facts and Wisdom rules.
 
-Ephemeral KWIM client job: per run, reads the team's episodic window past its
-watermark, asks the resident LLM to extract durable cross-episode learnings,
-proposes them to the governance gate ( evidence = episodic event ids), and advances
-the watermark only after proposals are submitted. Runs as a scheduled Kubernetes
-CronJob, one invocation per team (the team is implied by the mounted per-team
-kwim-api-key, like any agent).
+Each run reads the team's episodic events past the watermark, asks the LLM for
+durable cross-episode learnings, proposes them with their evidence, and then
+advances the watermark. One CronJob run per team, identified by its mounted key.
+See docs/DESIGN.md, "The client and the distiller".
 """
 import asyncio
 import json
@@ -81,10 +79,8 @@ object with a "kind" field of "fact" or "advisory" plus the fields listed above.
 
 
 def _format_events(events: list[dict]) -> tuple[str, dict[int, str]]:
-    """Present events to the LLM keyed by a small 1-based `ref` index, not the raw
-    UUID - models reliably echo small ints but mangle/truncate UUIDs.
-    Returns (json_for_prompt, ref->real_event_id) so the caller can map cited
-    refs back to real ids."""
+    """Present events keyed by a 1-based `ref` index instead of their ids.
+    Returns (json_for_prompt, ref->real_event_id)."""
     ref_to_id: dict[int, str] = {}
     compact = []
     for i, e in enumerate(events, start=1):
@@ -104,10 +100,7 @@ def _validate_candidate(item: object, ref_to_id: dict[int, str]) -> dict | None:
         log.warning("distiller: dropping non-dict candidate: %r", item)
         return None
 
-    # Evidence comes back as integer `ref` numbers (the LLM never sees real ids,
-    # which it mangles). Map each ref -> the real episodic event id, dropping refs
-    # that don't resolve. A candidate with no resolvable evidence is dropped - we
-    # never propose with fabricated/empty evidence.
+    # Map each `ref` back to its event id; drop the candidate if none resolve.
     raw_refs = item.get("evidence")
     if not isinstance(raw_refs, list):
         log.warning("distiller: dropping candidate with non-list evidence: %r", item)
@@ -156,11 +149,8 @@ def _validate_candidate(item: object, ref_to_id: dict[int, str]) -> dict | None:
 
 
 def _extract_json(content: str) -> str:
-    """Pull the JSON payload out of an LLM response that may wrap it in a
-    markdown fence (```json ... ```) or surrounding prose. Smaller models
-    frequently do this even when asked for raw JSON; a bare json.loads then
-    fails at char 0. Best-effort: strip the fence, else slice the outermost
-    [...] array."""
+    """Pull the JSON array out of an LLM response: strip a markdown fence, else
+    take the outermost [...]."""
     s = content.strip()
     if s.startswith("```"):
         s = s[3:]
@@ -179,11 +169,8 @@ def _extract_json(content: str) -> str:
 async def _distill(events: list[dict]) -> list[dict] | None:
     """LLM policy step.
 
-    Returns the candidate list (possibly empty) on a successful LLM round-trip,
-    or None if the LLM call/parse failed. The caller must not advance the
-    watermark on None - a transient failure would otherwise silently skip the
-    window forever. An empty list means the LLM ran and found nothing worth
-    keeping (safe to advance past)."""
+    Returns the candidates (possibly empty), or None if the LLM call or parse
+    failed, in which case the watermark must not advance."""
     llm = make_llm(model=os.environ.get("DISTILLER_MODEL"), agent="distiller")
     formatted, ref_to_id = _format_events(events)
     try:
@@ -206,9 +193,7 @@ async def _distill(events: list[dict]) -> list[dict] | None:
         return None
 
     if not isinstance(raw, list):
-        # Well-formed JSON, wrong shape - the model produced structured output,
-        # just not a list. Persistent (a prompt/model issue), so advance rather
-        # than poison-loop on it; logged for follow-up.
+        # Valid JSON but not a list: logged, and the window is not retried.
         log.warning("distiller: LLM response was valid JSON but not a list, dropping: %r", raw)
         return []
 
@@ -235,9 +220,7 @@ async def _propose(candidate: dict) -> dict | None:
 
 
 async def _load_watermark() -> tuple[str | None, str | None]:
-    # order="desc" + limit=1: the single latest watermark event in O(1), regardless
-    # of how many have accumulated (an "asc"+limit page would stay anchored on the
-    # oldest events forever once their count exceeds the limit).
+    # The latest watermark event: newest first, limit 1.
     result = await read_episodic(
         event_type=WATERMARK_EVENT_TYPE, limit=1, order="desc", strict=True
     )
@@ -249,9 +232,7 @@ async def _load_watermark() -> tuple[str | None, str | None]:
 
 
 async def _advance_watermark(cursor: dict) -> None:
-    # Awaited directly (not emit_episodic's fire-and-forget task) - this is a
-    # one-shot job that exits immediately after run(), so the write must
-    # complete before the event loop closes.
+    # Awaited, not fire-and-forget: the job exits right after run().
     await _post("/v1/memory/episodic", {
         "agent_id": DISTILLER_AGENT_ID,
         "session_id": "distiller",
@@ -261,10 +242,7 @@ async def _advance_watermark(cursor: dict) -> None:
 
 
 async def run() -> None:
-    # Preflight before any work. The KWIM client is fail-soft by design, so
-    # without this a missing key turns every call into a None-returning no-op:
-    # the window reads empty, "nothing to distill" looks like a clean run, and
-    # the job exits 0.
+    # Fail if KWIM is not configured, instead of reading an empty window.
     require_available()
 
     last_ts, last_id = await _load_watermark()
@@ -284,8 +262,7 @@ async def run() -> None:
     if events:
         candidates = await _distill(events)
         if candidates is None:
-            # Distill itself failed (LLM call/parse). Do not advance the
-            # watermark - retry this window next run (else the events are lost).
+            # Leave the watermark so the window is retried.
             distill_failed = True
         else:
             log.info("distiller: %d candidate(s) from %d event(s)", len(candidates), len(events))

@@ -1,11 +1,8 @@
-"""Request/response models = the typed contract (docs/contract.md).
-
-These drive FastAPI's OpenAPI, so the wire contract is generated from here.
-"""
+"""Request and response models; FastAPI's OpenAPI schema is generated from them."""
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # --- Knowledge ---------------------------------------------------------------
 
@@ -34,11 +31,7 @@ class Fact(BaseModel):
 
 
 class FactMatch(Fact):
-    """A fact returned by semantic search (knowledge/search).
-
-    `score` is a cosine distance - lower = closer, identical vector -> 0.0 - the same
-    convention as SemanticItem.score, so callers rank ascending.
-    """
+    """A fact returned by knowledge/search; `score` is a cosine distance (lower is closer)."""
     score: float
 
 
@@ -106,12 +99,7 @@ class Rule(BaseModel):
 
 
 class SeedRule(BaseModel):
-    """Full rule payload for POST /v1/wisdom/seed (operator-gated direct commit).
-
-    Unlike the `Rule` read-model, this carries the constraint enforcement fields
-    (action_pattern/verdict/authority/severity/check_tier) so a seeded
-    constraint isn't stripped to an empty husk.
-    """
+    """Full rule payload for POST /v1/wisdom/seed, including the constraint fields."""
     id: str
     rule_type: Literal["advisory", "constraint"] = "constraint"
     situation: dict[str, Any] | None = None
@@ -235,3 +223,44 @@ class PendingProposal(BaseModel):
 
 class RejectRequest(BaseModel):
     reason: str | None = None
+
+
+# --- Admin console identity ---------------------------------------------------
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AdminSessionResponse(BaseModel):
+    token: str
+    expires_at: datetime
+
+
+# --- Admin console: team provisioning + key management -----------------------
+
+class StrictRequest(BaseModel):
+    """Base for admin console request bodies: unknown fields are rejected (422).
+    Not used for the agent-facing models. See docs/DESIGN.md, "The admin API"."""
+    model_config = ConfigDict(extra="forbid")
+
+
+class TeamCreateRequest(StrictRequest):
+    team: str
+    display_name: str | None = None
+
+
+class TeamDecommissionRequest(StrictRequest):
+    reason: str
+
+
+class TeamDestroyRequest(StrictRequest):
+    preview_token: str
+    confirm_team: str
+    confirm_commit_rows: int
+
+
+class KeyMintRequest(StrictRequest):
+    label: str
+    capabilities: list[str] = Field(default_factory=list)
+    expires_at: datetime | None = None

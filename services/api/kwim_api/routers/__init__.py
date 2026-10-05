@@ -1,10 +1,10 @@
-"""One module per contract surface, each exporting a single `router`.
-
-The name is `router` in every module, never the surface name: a submodule and a
-package-level symbol sharing a name (`kwim_api.routers.memory` the module vs
-`memory` the APIRouter) shadow each other, and which one wins depends on import
-order.
+"""One module per contract surface, each exporting `router`. The name is never
+the surface name, which would shadow the submodule of the same name.
 """
+from .admin import router as admin_router
+from .admin_read import router as admin_read_router
+from .admin_teams import router as admin_teams_router
+from .admin_write import router as admin_write_router
 from .code import router as code_router
 from .knowledge import router as knowledge_router
 from .memory import router as memory_router
@@ -20,4 +20,8 @@ ALL_ROUTERS = (
     proposals_router,
     review_router,
     code_router,
+    admin_router,
+    admin_read_router,
+    admin_write_router,
+    admin_teams_router,
 )

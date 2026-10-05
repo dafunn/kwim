@@ -1,11 +1,7 @@
 """Code-graph half of the FalkorDB store - reads and writes over kwim_<team>_code.
 
-A separate graph from the K/W store, with its own DDL: `rebuild` replays commit_log
-into kwim_<team> and swaps it live, wiping whatever is not in the log. The code
-graph's source of truth is the repo, so rebuild never touches it.
-
-`CodeGraphStore` is mixed into `FalkorStore` and uses the connection and the
-schema-ensure helper the base class owns.
+A separate graph that rebuild never touches; see docs/DESIGN.md, "The code graph".
+`CodeGraphStore` is mixed into `FalkorStore` and uses its connection.
 """
 import logging
 import re
@@ -19,20 +15,14 @@ _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _code_graph_name(team: str) -> str:
-    """The team's code graph - a sibling of kwim_<team>, deliberately separate.
-
-    rebuild.py replays commit_log into kwim_<team> and swaps it live; anything not
-    in commit_log is wiped. The code graph's source of truth is the repo, not
-    commit_log, so it lives in its own graph that rebuild never touches.
-    """
+    """The name of the team's code graph, kwim_<team>_code."""
     if not _IDENT.match(team):
         raise ValueError(f"unsafe team identifier: {team!r}")
     return f"kwim_{team}_code"
 
 
-# Code-graph schema - applied to kwim_<team>_code only, never kwim_<team>.
-# Node ids are content-stable qualified names (e.g. "repo:path::qualified.name") so
-# MERGE-on-id upserts are idempotent across incremental re-extraction.
+# Code-graph schema, for kwim_<team>_code only. Node ids are qualified names
+# ("repo:path::qualified.name").
 _CODE_INIT_CYPHER = [
     "CREATE INDEX FOR (f:File) ON (f.id)",
     "CREATE INDEX FOR (f:File) ON (f.repo)",
@@ -53,21 +43,13 @@ class CodeGraphStore:
     """Code-graph methods. Requires `_db` and `_ensure_schema` from FalkorStore."""
 
     async def _code_graph(self, team: str):
-        """Return the team's code graph (kwim_<team>_code), ensuring its schema.
-
-        Separate from _graph: distinct graph name + distinct DDL, so rebuild's
-        commit_log replay can never touch it.
-        """
+        """Return the team's code graph (kwim_<team>_code), ensuring its schema."""
         name = _code_graph_name(team)
         g = self._db.select_graph(name)
         await self._ensure_schema(g, name, _CODE_INIT_CYPHER)
         return g
 
-    # --- Code graph -----------------------------------------------------------
-    # All writes/reads target kwim_<team>_code via _code_graph(). The graph holds
-    # structure/signatures/summaries/embeddings,never file bodies.
-    # Node ids are content-stable qualified names so MERGE upserts are idempotent
-    # across incremental re-extraction.
+    # --- Code graph: reads and writes on kwim_<team>_code ---------------------
 
     async def materialize_code_file(
         self, team: str, *, file_id: str, repo: str, path: str, lang: str,
@@ -170,10 +152,7 @@ class CodeGraphStore:
 
     async def prune_repo_files(self, team: str, *, repo: str, keep_paths: list[str]) -> int:
         """Delete File nodes (and their contained Function/Class nodes) for `repo`
-        whose path is not in keep_paths. MERGE-based extraction only adds/updates;
-        this is what removes files that were deleted from the repo or newly excluded
-        (e.g. via .cgignore) so they stop polluting queries + the distiller. Returns
-        the number of files pruned."""
+        whose path is not in keep_paths. Returns the number of files pruned."""
         g = await self._code_graph(team)
         res = await g.query(
             "MATCH (f:File {repo:$repo}) WHERE NOT f.path IN $keep "
@@ -254,8 +233,8 @@ class CodeGraphStore:
         min_confidence: float = 0.0,
     ) -> list[dict]:
         """Call-chain traversal. direction='outbound' = callees (deps),
-        'inbound' = callers (impact). Bounded by depth (1..N). Edges below
-        min_confidence are excluded so low-trust resolutions don't mislead."""
+        'inbound' = callers (impact). Bounded by depth (1..N); edges below
+        min_confidence are excluded."""
         depth = max(1, min(int(depth), 5))
         arrow = (f"-[:CALLS*1..{depth}]->" if direction == "outbound"
                  else f"<-[:CALLS*1..{depth}]-")

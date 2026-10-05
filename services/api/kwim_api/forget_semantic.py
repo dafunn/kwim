@@ -1,25 +1,6 @@
-"""Forget-semantic - governed hard-removal of :SemanticItem nodes.
+"""Forget semantic items: remove :SemanticItem nodes, and the commit_log rows of
+directly written ones, by exact id. See docs/DESIGN.md, "Forget".
 
-Destructive and irreversible, and the only removal path semantic memory has.
-`forget.py` covers governed objects (facts/rules); this covers the other half:
-
-  - the HTTP API exposes only GET/POST on /v1/memory/semantic - no delete verb;
-  - `falkor.forget_node` hardcodes label = "Fact" | "Rule", so `kwim_api.forget`
-    cannot reach a :SemanticItem;
-  - `POST /v1/memory/semantic` upserts on a caller-supplied `id`, so a chunk can
-    be replaced - but a chunk that should no longer exist at all (a retired
-    runbook section, a mis-seeded or leaked chunk) had no way out before this.
-
-Simpler than `forget.py` by design: `memory_semantic_write` calls
-`materialize_semantic` and nothing else - no commit_log row, no Postgres record,
-no Evidence edges - so the graph node is the whole object. There is nothing to
-half-forget, hence no Postgres preflight and no shared-evidence guard.
-
-Targets are exact ids only. There is deliberately no `--select` batch mode: a
-pattern that over-matches here cannot be undone by a rebuild, because semantic
-items are not derived from commit_log.
-
-Run (operator, privileged creds via the usual KWIM_* env / with-secrets.sh):
     python -m kwim_api.forget_semantic --team <team> --ids <id1,id2,...> [--commit]
 """
 from __future__ import annotations
@@ -28,7 +9,9 @@ import argparse
 import asyncio
 import logging
 
+from .forget import preflight
 from .stores.falkor import FalkorStore
+from .stores.postgres import PostgresStore
 
 log = logging.getLogger("forget_semantic")
 
@@ -38,8 +21,7 @@ log = logging.getLogger("forget_semantic")
 async def plan_forget_semantic(
     falkor: FalkorStore, team: str, item_ids: list[str],
 ) -> list[dict]:
-    """Resolve the target ids to {id, content}. Ids that don't resolve are logged
-    and skipped (absent from the result), matching `plan_forget`."""
+    """Resolve the target ids to {id, content}; unresolved ids are logged and skipped."""
     plan: list[dict] = []
     for oid in item_ids:
         item = await falkor.get_semantic_for_forget(team, oid)
@@ -51,17 +33,18 @@ async def plan_forget_semantic(
 
 
 async def execute_forget_semantic(
-    falkor: FalkorStore, team: str, plan: list[dict],
+    falkor: FalkorStore, pg: PostgresStore, team: str, plan: list[dict],
 ) -> dict:
-    """DETACH DELETE each planned node. `forget_semantic_node` verifies each one
-    is actually gone, so a silent partial failure surfaces in the report."""
-    deleted, failed = 0, []
+    """Delete each planned node, checking it is gone, then its commit_log row (a
+    bus-fed item has none). Requires `preflight().ok`."""
+    deleted, failed, rows = 0, [], 0
     for p in plan:
         if await falkor.forget_semantic_node(team, p["id"]):
             deleted += 1
+            rows += await pg.delete_commit_log(team, p["id"])
         else:
             failed.append(p["id"])
-    return {"semantic_items": deleted, "failed": failed}
+    return {"semantic_items": deleted, "commit_log_rows": rows, "failed": failed}
 
 
 def _print_plan(team: str, plan: list[dict]) -> None:
@@ -76,8 +59,9 @@ def _print_plan(team: str, plan: list[dict]) -> None:
 
 async def _amain(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    falkor = FalkorStore()
+    falkor, pg = FalkorStore(), PostgresStore()
     await falkor.connect()
+    await pg.connect()
     try:
         ids = [i.strip() for i in args.ids.split(",") if i.strip()]
         plan = await plan_forget_semantic(falkor, args.team, ids)
@@ -86,13 +70,19 @@ async def _amain(args: argparse.Namespace) -> int:
             return 0
         _print_plan(args.team, plan)
 
+        pre = await preflight(pg, args.team)
+        print(f"\nPostgres preflight (role {pre.get('role')}): "
+              f"{'ok' if pre.get('ok') else 'CANNOT DELETE'}")
+        if not pre.get("ok"):
+            print("Aborted - the role cannot delete commit_log rows, so a forgotten "
+                  "item would be replayed back by the next rebuild.")
+            return 1
+
         if not args.commit:
             print("\nDRY-RUN - nothing deleted. Re-run with --commit to forget.")
             return 0
 
-        # Confirmation - destructive + irreversible. Same two paths as kwim_api.forget:
-        # --confirm-count for non-interactive runs (aborts if the plan drifted
-        # since the dry-run), otherwise an interactive typed confirmation.
+        # --confirm-count N, or an interactive typed confirmation, as in kwim_api.forget.
         if args.confirm_count is not None:
             if len(plan) != args.confirm_count:
                 print(f"Count mismatch - plan has {len(plan)}, "
@@ -107,17 +97,18 @@ async def _amain(args: argparse.Namespace) -> int:
                 print("Confirmation mismatch - aborted, nothing deleted.")
                 return 1
 
-        report = await execute_forget_semantic(falkor, args.team, plan)
+        report = await execute_forget_semantic(falkor, pg, args.team, plan)
         print(f"\nFORGOTTEN: {report}")
         return 1 if report["failed"] else 0
     finally:
         await falkor.close()
+        await pg.close()
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kwim_api.forget_semantic",
-        description="KWIM semantic forget (DESTRUCTIVE hard-removal of :SemanticItem)",
+        description="KWIM semantic forget (destructive hard-removal of :SemanticItem)",
     )
     ap.add_argument("--team", required=True)
     ap.add_argument("--ids", required=True, help="comma-separated SemanticItem ids")

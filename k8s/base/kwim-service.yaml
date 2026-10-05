@@ -1,9 +1,6 @@
 ---
-# KWIM service - the contract teams call (K/W/M API + governance gate).
-# Stateless, not node-pinned (spreads across nodes; backends are reached over
-# the network). Secrets arrive as mounted files (projected Secret volume); the
-# start command assembles the backend URLs from them - keeps creds out of the
-# image and out of plain env in the manifest.
+# KWIM service: the K/W/M API and the governance gate. Secrets are mounted as
+# files and loaded by with-secrets.sh at start.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,9 +33,8 @@ spec:
               - secret: { name: kwim-rabbitmq,  items: [{ key: value, path: rabbitmq-password }] }
               - secret: { name: kwim-falkordb,  items: [{ key: value, path: falkordb-password }] }
               - secret: { name: kwim-api-keys,  items: [{ key: value, path: api-keys }] }
-              # Capability allowlist (key-id prefixes for promote/seed/review).
-              # Optional so the pod starts before the operator provisions it; until
-              # then promote/seed/review fail-closed (403) by design.
+              # Legacy capability lists; optional. Without them promote, seed and
+              # review are refused.
               - secret: { name: kwim-promote-keys, items: [{ key: value, path: promote-keys }], optional: true }
               # Mattermost review-surface secrets - operator-provisioned
               # later; optional so the pod starts before they exist.
@@ -57,9 +53,7 @@ spec:
             - 0.0.0.0
             - --port
             - "8000"
-          # Backend endpoints. Defaults assume the backends run as same-namespace
-          # Services named postgresql/falkordb/rabbitmq/embedder; override the hosts
-          # in your overlay for cross-namespace or external backends.
+          # Backend hosts; the defaults are same-namespace Services.
           env:
             - { name: KWIM_PG_HOST,     value: "postgresql" }
             - { name: KWIM_PG_PORT,     value: "5432" }
@@ -75,8 +69,7 @@ spec:
             # KWIM_PROMOTE_KEYS / KWIM_REVIEW_KEYS are exported by with-secrets.sh
             # from the mounted /secrets/promote-keys file - never hardcoded here.
             - { name: KWIM_SERVICE_URL, value: "http://kwim-service:8000" }
-            # Trace propagation - fail-soft no-op if the collector isn't reachable.
-            # Unset by default; set the OTLP endpoint in your overlay to enable.
+            # OTLP endpoint; unset by default.
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "" }
             - { name: OTEL_SERVICE_NAME, value: "kwim-service" }
           ports:

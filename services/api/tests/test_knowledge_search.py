@@ -8,9 +8,6 @@ Covers the four pieces that make a free-text subject retrievable:
   - memory/context               - tag hits unioned with KNN hits, deduped,
                                    distance-capped, coverage split tag_n/semantic_n
   - kwim_api.backfill_embeddings      - facts committed without a vector get one, in place
-
-The regression that motivated all of it: a subject the caller could not name as an
-exact `about` tag returned knowledge: [] even with the facts committed and queryable.
 """
 from typing import Any
 
@@ -55,10 +52,10 @@ def _store(results: list[Any]):
 
 
 def _row(fid: str, statement: str, score: float, about: list[str] | None = None,
-         fact_type: str = "product", decay_class: str = "slow"):
+         fact_type: str = "product", decay_class: str = "slow", commit_seq: int | None = None):
     """One `_fact_projection` row + trailing score, in column order."""
     return [fid, statement, fact_type, "current", "1750000000000", about or [],
-            decay_class, "agent_proposal", None, score]
+            decay_class, "agent_proposal", None, commit_seq, score]
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +70,7 @@ async def test_search_facts_unfiltered_uses_vector_index():
         "id": "f1", "statement": "The Widget ships with a spare gasket.", "fact_type": "product",
         "status": "current", "created_at": "1750000000000", "about": [],
         "decay_class": "slow", "source_kind": "agent_proposal", "last_verified_at": None,
-        "score": 0.12,
+        "commit_seq": None, "score": 0.12,
     }]
     cypher = captured[0]["cypher"]
     assert "db.idx.vector.queryNodes('Fact', 'embedding'" in cypher
@@ -84,7 +81,7 @@ async def test_search_facts_unfiltered_uses_vector_index():
 
 async def test_search_facts_filtered_scans_instead_of_indexing():
     """Filtered search has to filter before it scores - going through the index
-    would apply the filter after the top-k cut and return nothing off-cliff."""
+    would apply the filter after the top-k cut."""
     fs, captured = _store([[_row("f1", "Widgets ship sealed.", 0.3, about=["Widget"])]])
     rows = await fs.search_facts("acme", [0.1], limit=5, about=["widget"])
 
@@ -113,7 +110,7 @@ async def test_search_facts_empty_index_returns_empty_not_raises():
 
 async def test_search_facts_row_mapping_defaults():
     fs, _ = _store([[["f1", "s", "product", "current", "1750000000000", None,
-                      None, None, None, 0.5]]])
+                      None, None, None, None, 0.5]]])
     row = (await fs.search_facts("acme", [0.1]))[0]
     assert row["about"] == []
     assert row["decay_class"] == "slow"
@@ -123,11 +120,11 @@ async def test_search_facts_row_mapping_defaults():
 
 async def test_search_facts_matches_query_facts_row_shape():
     """Both feed _enrich_facts and get unioned in memory/context - the keys must
-    be identical or the bundle grows ragged rows."""
+    be identical."""
     fs, _ = _store([[_row("f1", "s", 0.1)]])
     sem = (await fs.search_facts("acme", [0.1]))[0]
     fs2, _ = _store([[["f1", "s", "product", "current", "1750000000000", [],
-                       "slow", "agent_proposal", None]]])
+                       "slow", "agent_proposal", None, None]]])
     tag = (await fs2.query_facts("acme", None, "current", 10))[0]
     assert set(sem) - {"score"} == set(tag)
 
@@ -286,8 +283,7 @@ def call_context(monkeypatch):
 
 async def test_free_text_subject_retrieves_via_knn(call_context):
     """The regression this whole path exists for: a subject that matches no
-    `about` tag used to return
-    knowledge: [] with the fact sitting right there."""
+    `about` tag still retrieves the fact."""
     sem = [_fact("f1", 0.18)]
     result, _ = await call_context("what ships with the widget", tag_facts=[], sem_facts=sem)
 
@@ -317,9 +313,8 @@ async def test_tag_hits_lead_and_dedupe_against_knn(call_context):
 
 async def test_distance_cutoff_drops_far_matches(call_context):
     """Unbounded KNN always returns its k nearest, however unrelated. Anything past
-    retrieval.context_semantic_max_dist (0.6) must not reach the prompt. The
-    fixtures straddle it: measured live, a named-entity question puts the right
-    fact at 0.25-0.55 and the next-best at 0.63+."""
+    retrieval.context_semantic_max_dist (0.6) is dropped; the fixtures sit on both
+    sides of it."""
     sem = [_fact("near", 0.2), _fact("far", 0.95)]
     result, _ = await call_context("subject", tag_facts=[], sem_facts=sem)
 
@@ -328,8 +323,7 @@ async def test_distance_cutoff_drops_far_matches(call_context):
 
 
 async def test_context_rows_have_uniform_shape(call_context):
-    """The bundle is one flat list - a `score` on half the rows is a ragged shape
-    for whatever consumes it."""
+    """Every row in the context bundle has the same keys (no `score`)."""
     tag = [{"id": "t1", "statement": "tagged", "fact_type": "product",
             "status": "current", "created_at": "2026-08-01T00:00:00+00:00",
             "about": ["Widget"], "decay_class": "slow", "source_kind": None,

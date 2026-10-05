@@ -1,19 +1,8 @@
-"""KWIM service configuration - the single inventory of every setting.
+"""KWIM service configuration - every setting the service reads.
 
-Two surfaces, by concern:
-
-  * Secrets + connection endpoints stay discrete env vars (host/port/user/db/vhost
-    as plain env; passwords/keys as their own env vars from mounted secret
-    files). We deliberately do not build URL DSNs with inline passwords -
-    base64/random passwords contain `+ / = @` which corrupt a URL's authority
-    parsing. Passing params as keyword args sidesteps URL-encoding entirely.
-    These have no YAML home: they come from k8s Secrets, never a checked-in file.
-
-  * Everything else is a tunable, declared in `kwim.defaults.yaml` and
-    overridable, in precedence order:
-        env var  >  KWIM_CONFIG (user YAML)  >  kwim.defaults.yaml
-    So a deployer customizes one YAML file, k8s can still pin any key via the
-    ConfigMap env block, and the defaults are the safety net.
+Secrets and connection endpoints are discrete environment variables. Tunables
+come from `kwim.defaults.yaml`, overridden by KWIM_CONFIG and then by environment
+variables. See docs/DESIGN.md, "Configuration".
 """
 import json
 import os
@@ -60,8 +49,7 @@ def _dig(dotted: str, fallback):
 
 
 def _cfg(dotted: str, env: str, cast, fallback):
-    """env var (a string) overrides the merged-YAML value, which overrides the
-    in-code fallback (used only if the defaults file is missing/incomplete)."""
+    """The env var, else the merged YAML value, else the in-code fallback."""
     raw = os.environ.get(env)
     if raw is not None and raw != "":
         return cast(raw)
@@ -134,14 +122,30 @@ class Settings:
 
     # --- Auth / capability allowlists (keys are secrets; modes are env) ---
     api_key_source: str = os.environ.get("KWIM_API_KEY_SOURCE", "env")
-    # NB: KWIM_API_KEYS ("key:team,key:team") is read directly by auth.py, not
-    # snapshotted here - it is a runtime-provisioned secret whose key map is built at
-    # import and must reflect the live env (a frozen snapshot would miss late binding).
-    # Comma-separated key-id prefixes (first 6 chars of the bearer key) permitted to
-    # promote/seed. Empty = no promotions allowed (fail-closed). Proper RBAC later.
+    # KWIM_API_KEYS is read by auth.py from the live environment.
+    # Legacy key-id prefixes (first 6 characters) allowed to promote and seed;
+    # empty allows none.
     promote_keys: str = os.environ.get("KWIM_PROMOTE_KEYS", "")
     # Comma-separated key-id prefixes permitted to use /v1/review/*. Empty = fail-closed.
     review_keys: str = os.environ.get("KWIM_REVIEW_KEYS", "")
+
+    # --- Admin: kwim_admin-backed key store + console identity ---
+    admin_enabled: bool = _cfg_bool("admin.enabled", "KWIM_ADMIN_ENABLED", False)
+    admin_key_cache_ttl_seconds: float = _cfg(
+        "admin.key_cache_ttl_seconds", "KWIM_ADMIN_KEY_CACHE_TTL", float, 30)
+    admin_secure_cookie: bool = _cfg_bool("admin.secure_cookie", "KWIM_ADMIN_SECURE_COOKIE", True)
+    admin_session_ttl_hours: float = _cfg(
+        "admin.session_ttl_hours", "KWIM_ADMIN_SESSION_TTL_HOURS", float, 12)
+    admin_session_max_age_days: float = _cfg(
+        "admin.session_max_age_days", "KWIM_ADMIN_SESSION_MAX_AGE_DAYS", float, 7)
+    admin_login_max_failures: int = _cfg(
+        "admin.login_max_failures", "KWIM_ADMIN_LOGIN_MAX_FAILURES", int, 5)
+    admin_login_lockout_minutes: float = _cfg(
+        "admin.login_lockout_minutes", "KWIM_ADMIN_LOGIN_LOCKOUT_MINUTES", float, 15)
+    admin_allow_team_create: bool = _cfg_bool(
+        "admin.allow_team_create", "KWIM_ADMIN_ALLOW_TEAM_CREATE", True)
+    admin_allow_team_destroy: bool = _cfg_bool(
+        "admin.allow_team_destroy", "KWIM_ADMIN_ALLOW_TEAM_DESTROY", False)
 
     # --- Human-review surface - secrets + this service's own URL ---
     # Incoming webhook URL for review notifications. Unset = no notifications.
@@ -154,10 +158,8 @@ class Settings:
     service_url: str = os.environ.get("KWIM_SERVICE_URL", "")
 
     # --- Telemetry ---
-    # NB: OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME (standard OTEL env names,
-    # no KWIM_ prefix) are read directly by otel.py and the OTLP exporter - live env,
-    # not snapshotted (configure() may run before the value is bound). Listed here so
-    # config.py stays the one inventory of every setting the service consumes.
+    # OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SERVICE_NAME are read by otel.py and the
+    # OTLP exporter from the live environment.
 
     # ===================== Tunables (kwim.defaults.yaml + env) =====================
     # --- Gate (dedup, contradiction screen, evidence integrity) ---
@@ -166,6 +168,11 @@ class Settings:
     gate_review_distance: float = _cfg("gate.review_distance", "KWIM_GATE_REVIEW_DIST", float, 0.25)
     gate_verify_enabled: bool = _cfg_bool("gate.verify_enabled", "KWIM_GATE_VERIFY", True)
     gate_summary_max: int = _cfg("gate.summary_max", "KWIM_GATE_SUMMARY_MAX", int, 500)
+
+    # --- Postgres connection pool (one pool each for PostgresStore and AdminStore) ---
+    pg_pool_min_size: int = _cfg("postgres.pool_min_size", "KWIM_PG_POOL_MIN_SIZE", int, 1)
+    pg_pool_max_size: int = _cfg("postgres.pool_max_size", "KWIM_PG_POOL_MAX_SIZE", int, 4)
+    pg_pool_timeout_s: float = _cfg("postgres.pool_timeout_s", "KWIM_PG_POOL_TIMEOUT", float, 30.0)
 
     # --- Decay / freshness ---
     halflife_slow_days: float = _cfg("decay.halflife_slow_days", "KWIM_DECAY_HALFLIFE_SLOW", float, 90)

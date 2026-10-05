@@ -3,15 +3,15 @@
   1. structure   - discover files, compute content hashes
   2. extraction  - tree-sitter defs/imports/call-sites (parse.py)
   3. resolution  - confidence-scored CALLS edges (resolve.py)
-  4. enrichment  - (Python-first: IMPORTS edges; effects deferred)
+  4. enrichment  - IMPORTS edges
   5. flush       - write nodes/edges into kwim_<team>_code (FalkorStore)
   6. post-index  - Louvain communities -> MEMBER_OF
 
 Run:
   python -m kwim_api.codegraph.extract --team <team> --repo <name> --path <checkout> [--no-embed]
 
-Incremental: files whose xxh3 hash matches the graph are skipped (definitions),
-but all files are parsed for the registry so cross-file calls still resolve.
+Files whose xxh3 hash matches the graph are not rewritten, but every file is
+parsed so calls across files resolve.
 """
 from __future__ import annotations
 
@@ -93,9 +93,7 @@ async def extract_repo(
             call_edges.append((caller_qn, res.qn, res.confidence))
             n_calls += 1
 
-    # Prune: drop any File (+ contained defs) no longer discovered - deleted files
-    # or newly-excluded paths (.cgignore). MERGE never removes; this does, so the
-    # graph and the distiller stop seeing stale nodes (e.g. excluded vendored trees).
+    # Remove files (and their definitions) no longer discovered.
     keep_paths = [rel for rel, _ in files]
     pruned = await store.prune_repo_files(team, repo=repo, keep_paths=keep_paths)
 

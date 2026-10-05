@@ -1,6 +1,6 @@
 """Pure-logic tests for memory_context coverage markers and knowledge slot filling.
 
-Tests the key behaviours from the spec:
+Covers:
   - subject present + matching fact -> knowledge populated, covered=true
   - subject present + no match -> knowledge=[], covered=false, queried=true
   - subject absent -> covered=false, queried=false

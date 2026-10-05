@@ -3,6 +3,7 @@ reaffirm, and propose (docs/contract.md).
 """
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -39,26 +40,14 @@ async def knowledge_query(team: TeamContext = CurrentTeam,
 async def knowledge_search(q: str, limit: int = 10, fact_type: str | None = None,
                            about: list[str] | None = Query(None),
                            team: TeamContext = CurrentTeam):
-    """Semantic search over governed facts - Tier 1 retrieval for Knowledge.
-
-    The retrieval counterpart to /query. /query needs the caller to already know the
-    tag it wants; this one takes free text and answers "what do we know about this?"
-    - the case where the agent does not know what it is looking for.
-
-    Results are ranked by cosine distance (`score`, lower = closer) and are not
-    re-sorted by freshness; each carries its own freshness marker so the caller
-    can judge.
-    `about` / `fact_type` narrow the candidate set before scoring, with the same
-    case-insensitive semantics /query uses.
-
-    Facts with no embedding cannot match - see `kwim_api.backfill_embeddings`.
+    """Semantic search over current facts, ranked by cosine distance (`score`,
+    lower is closer), each with its freshness. `about` and `fact_type` filter
+    before scoring. See docs/DESIGN.md, "Retrieval".
     """
     try:
         qvec = (await State.embedder.embed([q]))[0]
     except Exception as exc:
-        # 503, never an empty list. A silent [] here is indistinguishable from
-        # "we know nothing about that", which is the one answer this endpoint
-        # must never give by accident.
+        # 503 rather than an empty list.
         log.warning("knowledge_search: embed failed for q=%r: %s", q, exc)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="embedder unavailable - semantic search cannot run") from exc
@@ -84,21 +73,19 @@ async def knowledge_fact(fact_id: str, team: TeamContext = CurrentTeam):
 
 @router.post("/facts/{fact_id}/reaffirm", status_code=status.HTTP_204_NO_CONTENT)
 async def knowledge_reaffirm(fact_id: str, team: TeamContext = CurrentTeam):
-    """Non-governance freshness touch: stamp last_verified_at = now.
-
-    Distinct from human confirm/retract - this is a machine assertion that the
-    source still vouches for the fact. 404 if the fact does not exist.
-    """
-    found = await State.falkor.reaffirm_fact(team.team, fact_id)
+    """Stamp last_verified_at = now on a current fact, in the graph (which also
+    checks it exists; 404 if not) and then in fact_verifications."""
+    now = datetime.now(UTC)
+    found = await State.falkor.reaffirm_fact(
+        team.team, fact_id, verified_at=int(now.timestamp() * 1000))
     if not found:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"fact {fact_id} not found")
+    await State.pg.record_verification(team.team, fact_id, now, verified_by=team.key_id)
 
 
 @router.get("/audit/{fact_id}", response_model=FactAudit)
 async def knowledge_audit(fact_id: str, at: str | None = None, team: TeamContext = CurrentTeam):
-    # ?at= (point-in-time) is deferred for now - we return the full version chain.
-    # True at= needs the commit_log as the authoritative time source (see wisdom/
-    # data-model notes); the graph has no valid_from/superseded_at.
+    # Returns the full version chain; there is no point-in-time `at` parameter.
     chain = await State.falkor.audit_fact(team.team, fact_id)
     if not chain:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"fact {fact_id} not found")

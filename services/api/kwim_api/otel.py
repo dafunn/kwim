@@ -1,11 +1,5 @@
-"""OTel SDK initialisation for the KWIM service
-
-Call configure(app) once at application startup, right after the FastAPI app
-is instantiated.
-
-Fail-soft: if OTEL_EXPORTER_OTLP_ENDPOINT is unset, this is a no-op - no
-TracerProvider is installed and no instrumentation is applied.
-KWIM service has no collector dependency by default.
+"""OpenTelemetry setup. configure(app) runs once after the app is created and does
+nothing when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
 """
 
 import os
@@ -20,9 +14,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 
 def configure(app: FastAPI, service_name: str | None = None) -> None:
-    # Read the env live (not a frozen settings snapshot): the OTLP exporter reads
-    # OTEL_EXPORTER_OTLP_ENDPOINT from the env itself, and configure() may run before
-    # the value is bound. See config.py for the OTEL_* inventory note.
+    # Read from the live environment, as the OTLP exporter does.
     if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
         return
 

@@ -3,11 +3,13 @@
 Covers:
   - Commit-log replay dispatch (fact commit, rule commit, reinforce, deprecate,
     retract, confirm, unknown-op, parsed-JSONB payloads).
+  - created_at restoration from the commit row's committed_at.
   - Semantic re-embed batching.
   - CLI arg validation.
 """
 import argparse
 import json
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # Fake stores for replay tests
@@ -17,13 +19,17 @@ class _FakeFalkor:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def materialize_fact(self, team, fact, provenance, graph_name=None, embedding=None) -> None:
+    async def materialize_fact(self, team, fact, provenance, graph_name=None, embedding=None,
+                               created_at=None) -> None:
         self.calls.append({"method": "materialize_fact", "team": team, "fact": fact,
-                           "provenance": provenance, "graph_name": graph_name, "embedding": embedding})
+                           "provenance": provenance, "graph_name": graph_name,
+                           "embedding": embedding, "created_at": created_at})
 
-    async def materialize_rule(self, team, rule, provenance, graph_name=None) -> None:
+    async def materialize_rule(self, team, rule, provenance, graph_name=None,
+                               created_at=None) -> None:
         self.calls.append({"method": "materialize_rule", "team": team, "rule": rule,
-                           "provenance": provenance, "graph_name": graph_name})
+                           "provenance": provenance, "graph_name": graph_name,
+                           "created_at": created_at})
 
     async def reinforce_rule(self, team, rule_id, evidence, seq, graph_name=None) -> bool:
         self.calls.append({"method": "reinforce_rule", "team": team, "rule_id": rule_id,
@@ -34,9 +40,9 @@ class _FakeFalkor:
         self.calls.append({"method": "deprecate_rule", "team": team, "rule_id": rule_id,
                            "graph_name": graph_name})
 
-    async def materialize_semantic(self, team, item, graph_name=None) -> None:
+    async def materialize_semantic(self, team, item, graph_name=None, created_at=None) -> None:
         self.calls.append({"method": "materialize_semantic", "team": team, "item": item,
-                           "graph_name": graph_name})
+                           "graph_name": graph_name, "created_at": created_at})
 
     async def retract_object(self, team, object_type, object_id, graph_name=None) -> None:
         self.calls.append({"method": "retract_object", "team": team, "object_type": object_type,
@@ -69,6 +75,10 @@ class _FakeEmbedder:
         return self._response[: len(texts)]
 
 
+_OLD = datetime(2020, 9, 13, 12, 26, 40, tzinfo=UTC)
+_OLD_MS = int(_OLD.timestamp() * 1000)
+
+
 def _commit_row(**overrides) -> dict:
     row = {"seq": 1, "object_type": "fact", "object_id": "f1", "operation": "commit",
            "payload": json.dumps({}), "provenance": json.dumps({})}
@@ -76,12 +86,12 @@ def _commit_row(**overrides) -> dict:
     return row
 
 
-async def _replay(commit_rows, graph_name=None):
+async def _replay(commit_rows, graph_name=None, embedder=None):
     from kwim_api.rebuild import _replay_commit
 
     ff = _FakeFalkor()
     pg = _FakePostgres(commit_rows=commit_rows)
-    await _replay_commit(pg, ff, "acme", graph_name)
+    await _replay_commit(pg, ff, "acme", graph_name, embedder)
     return ff
 
 
@@ -168,6 +178,133 @@ async def test_replay_parsed_jsonb_payload():
         provenance={"proposed_by": "agent-c"},
     )])
     assert ff.calls[0]["fact"]["statement"] == "s3"
+
+
+# ---------------------------------------------------------------------------
+# Semantic replay (directly written items only)
+# ---------------------------------------------------------------------------
+
+def _semantic_row(**overrides) -> dict:
+    row = _commit_row(
+        seq=1, object_type="semantic", object_id="s1", operation="commit",
+        payload=json.dumps({"content": "keep me", "metadata": {"k": "v"}}),
+    )
+    row.update(overrides)
+    return row
+
+
+async def test_replay_semantic_commit_materializes():
+    ff = await _replay([_semantic_row()], embedder=_FakeEmbedder([[0.5] * 3]))
+    assert len(ff.calls) == 1
+    assert ff.calls[0]["method"] == "materialize_semantic"
+    assert ff.calls[0]["item"]["id"] == "s1"
+    assert ff.calls[0]["item"]["content"] == "keep me"
+    assert ff.calls[0]["item"]["metadata"] == {"k": "v"}
+    assert ff.calls[0]["item"]["embedding"] == [0.5, 0.5, 0.5]
+
+
+async def test_replay_semantic_restores_committed_at():
+    ff = await _replay([_semantic_row(committed_at=_OLD)],
+                       embedder=_FakeEmbedder([[0.5] * 3]))
+    assert ff.calls[0]["created_at"] == _OLD_MS
+
+
+async def test_replay_semantic_targets_the_temp_graph():
+    ff = await _replay([_semantic_row()], graph_name="kwim_acme_rebuild",
+                       embedder=_FakeEmbedder([[0.5] * 3]))
+    assert ff.calls[0]["graph_name"] == "kwim_acme_rebuild"
+
+
+async def test_replay_semantic_without_embedder_is_skipped():
+    """--skip-semantic leaves the item in commit_log; a later rebuild restores it."""
+    ff = await _replay([_semantic_row()], embedder=None)
+    assert ff.calls == []
+
+
+async def test_replay_semantic_embed_failure_does_not_abort():
+    class _Boom:
+        async def embed(self, texts):
+            raise RuntimeError("embedder down")
+
+    ff = await _replay([_semantic_row(), _commit_row(
+        seq=2, object_type="fact", object_id="f1", operation="commit",
+        payload=json.dumps({"statement": "s", "fact_type": "ft"}))], embedder=_Boom())
+    # The semantic row is skipped, but the fact after it still replays.
+    assert [c["method"] for c in ff.calls] == ["materialize_fact"]
+
+
+# ---------------------------------------------------------------------------
+# created_at restoration from committed_at
+# ---------------------------------------------------------------------------
+
+def test_epoch_ms_accepts_datetime():
+    from kwim_api.rebuild import _epoch_ms
+
+    assert _epoch_ms(_OLD) == _OLD_MS
+
+
+def test_epoch_ms_accepts_iso_string():
+    from kwim_api.rebuild import _epoch_ms
+
+    assert _epoch_ms("2020-09-13T12:26:40+00:00") == _OLD_MS
+
+
+def test_epoch_ms_none_and_unparseable():
+    from kwim_api.rebuild import _epoch_ms
+
+    assert _epoch_ms(None) is None
+    assert _epoch_ms("not a timestamp") is None
+
+
+async def test_replay_fact_restores_committed_at():
+    ff = await _replay([_commit_row(
+        seq=1, object_type="fact", object_id="f1", operation="commit",
+        committed_at=_OLD,
+        payload=json.dumps({"statement": "s1", "fact_type": "ft1"}),
+    )])
+    assert ff.calls[0]["created_at"] == _OLD_MS
+
+
+async def test_replay_rule_restores_committed_at():
+    ff = await _replay([_commit_row(
+        seq=2, object_type="rule", object_id="r1", operation="commit",
+        committed_at=_OLD,
+        payload=json.dumps({"rule_type": "advisory", "approach": "do y"}),
+    )])
+    assert ff.calls[0]["created_at"] == _OLD_MS
+
+
+async def test_replay_without_committed_at_leaves_created_at_unset():
+    # No committed_at: the node gets the store's own timestamp.
+    ff = await _replay([_commit_row(
+        seq=3, object_type="fact", object_id="f2", operation="commit",
+        payload=json.dumps({"statement": "s2", "fact_type": "ft2"}),
+    )])
+    assert ff.calls[0]["created_at"] is None
+
+
+async def test_replayed_fact_stays_stale():
+    """A rebuild keeps an old fact stale."""
+    from kwim_api.freshness import _to_dt, compute_freshness
+
+    ff = await _replay([_commit_row(
+        seq=1, object_type="fact", object_id="f1", operation="commit",
+        committed_at=_OLD,
+        payload=json.dumps({"statement": "s1", "fact_type": "observation"}),
+    )])
+    as_of = _to_dt(ff.calls[0]["created_at"]).isoformat()
+    assert compute_freshness(as_of, "slow", 90, 48) == "stale"
+
+
+async def test_rebuild_semantic_carries_event_time():
+    from kwim_api.rebuild import _rebuild_semantic
+
+    events = [{"id": "ev0", "agent_id": "a0", "session_id": "s0", "event_type": "turn",
+               "event_data": {"text": "text0"}, "occurred_at": _OLD}]
+    ff = _FakeFalkor()
+    await _rebuild_semantic(_FakePostgres(episodic_rows=events), ff,
+                            _FakeEmbedder([[0.0] * 3]), "acme", None)
+    assert ff.calls[0]["created_at"] == _OLD_MS
 
 
 # ---------------------------------------------------------------------------

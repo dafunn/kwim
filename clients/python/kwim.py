@@ -1,8 +1,8 @@
 """KWIM client - emit episodic events to the KWIM substrate.
 
-A strict side-channel: emitting must never block the agent pipeline meaningfully
-and must never raise into it. If KWIM is unconfigured, unreachable, or erroring,
-the agents carry on exactly as before. Events are scheduled fire-and-forget.
+Agent-facing calls never raise: without configuration, or with KWIM unreachable,
+they return empty defaults, and emits are fire-and-forget. See docs/DESIGN.md,
+"The client and the distiller".
 
 Config:
   KWIM_BASE_URL  - e.g. http://kwim-service:8000
@@ -26,12 +26,8 @@ KWIM_BASE_URL = os.environ.get("KWIM_BASE_URL", "").rstrip("/")
 class KwimUnavailable(RuntimeError):
     """KWIM is unconfigured or unreachable, on a path that refuses to no-op.
 
-    Raised only from the strict entry points below (`require_available`,
-    `read_episodic(strict=True)`). The agent-facing emit paths stay fail-soft
-    and never raise this: breaking an agent pipeline over a side-channel is
-    worse than losing an event. For a job that exists solely to move KWIM
-    data the tradeoff inverts - a silent success is the worse outcome, because
-    it is indistinguishable from healthy and so can run dead for weeks.
+    Raised only by the strict entry points, `require_available` and
+    `read_episodic(strict=True)`.
     """
 
 _api_key: str | None = None
@@ -53,9 +49,7 @@ def _key() -> str | None:
 def require_available() -> str:
     """Preflight for KWIM-only jobs: return the team key or raise.
 
-    The strict counterpart to `_key()`. Call this at startup from anything whose
-    whole purpose is KWIM work (the distiller), so a misconfigured deployment
-    exits non-zero instead of reporting success for doing nothing.
+    For jobs whose whole purpose is KWIM work, such as the distiller.
     """
     if not KWIM_BASE_URL:
         raise KwimUnavailable("KWIM_BASE_URL is unset - there is nothing to talk to")
@@ -127,8 +121,7 @@ def emit_episodic(agent_id: str, session_id: str, event_type: str,
                   event_data: dict | None = None) -> None:
     """Schedule a fire-and-forget episodic emit. Non-blocking; never raises.
 
-    Safe to call from any async context (the agents run under an event loop).
-    The task is tracked so it isn't GC'd before completing.
+    Call from a running event loop. The task is kept referenced until it completes.
     """
     try:
         task = asyncio.create_task(_post_episodic(agent_id, session_id, event_type, event_data or {}))
@@ -167,9 +160,8 @@ async def knowledge_search(
 ) -> list[dict]:
     """Semantic search over governed facts. Fail-soft by initializing empty [].
 
-    Use this when you do not already know the tag - `knowledge_query(about=[...])`
-    is the exact-tag path, this one takes free text. Each result carries `score`
-    (cosine distance, lower = closer) and is ordered nearest-first.
+    Free-text counterpart to `knowledge_query(about=[...])`. Results are ordered
+    nearest first; `score` is a cosine distance.
     """
     params: dict[str, object] = {"q": q, "limit": limit}
     if fact_type:
@@ -183,8 +175,7 @@ async def knowledge_search(
 async def wisdom_rules(**situation) -> list[dict]:
     """Fetch approved wisdom rules matching a situation. Fail-soft with empty [].
 
-    **situation is an open set of team-defined key/values, sent as
-    situation.<k>=<v> query params and AND-matched server-side.
+    Each **situation item becomes a situation.<k>=<v> param; all must match.
     """
     params: dict[str, object] = {}
     for k, v in situation.items():
@@ -209,9 +200,8 @@ async def memory_context(
 ) -> dict:
     """Assemble working context for a turn. Fail-soft with empty bundle.
 
-    `session_id` and `subject` are KWIM-interpreted (recent turns / knowledge
-    `about` join). **situation is an open set of team-defined key/values,
-    sent as situation.<k>=<v> params and matched against wisdom rules.
+    `session_id` selects recent events and `subject` the knowledge; each
+    **situation item becomes a situation.<k>=<v> param for the wisdom rules.
     """
     params: dict[str, object] = {"session_id": session_id}
     if subject:
@@ -283,14 +273,10 @@ async def read_episodic(
 ) -> dict:
     """GET /v1/memory/episodic - windowed team read on the (occurred_at, id) cursor.
 
-    order="desc" returns newest-first with the cursor as an exclusive upper bound -
-    e.g. limit=1, order="desc" fetches the single latest matching event in O(1).
+    order="desc" returns newest first, with the cursor as an exclusive upper bound.
 
-    Returns {events, next_cursor} or {events: [], next_cursor: None} on failure (fail-soft).
-
-    strict=True raises KwimUnavailable on a failed read instead of returning the
-    empty sentinel. Use it from jobs that branch on emptiness: fail-soft makes a
-    broken read look exactly like "no new events", which reads as success.
+    Returns {events, next_cursor}, or {events: [], next_cursor: None} on failure.
+    strict=True raises KwimUnavailable on a failed read instead.
     """
     params: dict[str, object] = {"limit": limit, "order": order}
     if since_ts is not None:
@@ -323,9 +309,8 @@ async def wisdom_propose(
 ) -> dict | None:
     """Propose a learned-rule candidate to the governance gate. Fail-soft with None.
 
-    advisory: situation + approach + evidence. constraint fields (action_pattern,
-    verdict, authority, severity, check_tier) are supported for completeness but
-    the distiller does not auto-emit them.
+    advisory: situation, approach and evidence. constraint: action_pattern,
+    verdict, authority, severity and check_tier.
     """
     body: dict[str, object] = {"rule_type": rule_type, "source_kind": source_kind}
     if rule_type == "advisory":

@@ -1,8 +1,5 @@
-"""Code graph - reads over kwim_<team>_code.
-
-Read-only queries against the team's code graph. Every call emits an episodic
-`code_tool_observation` event, which the distiller can promote into governed
-K/W (hubs, high-fan-in, cross-repo interfaces).
+"""Code graph reads over kwim_<team>_code. Each read is recorded as an episodic
+`code_tool_observation` event.
 """
 import logging
 
@@ -19,12 +16,7 @@ router = APIRouter(prefix="/v1/code", tags=["code"])
 
 
 async def _emit_code_observation(team: str, tool: str, args: dict, summary: dict) -> None:
-    """Land a code-graph read in episodic memory.
-
-    Best-effort: a failed emit never fails the read. The guard spans the whole
-    append-then-publish pair, so it is written out rather than using
-    `common.best_effort`.
-    """
+    """Record a code-graph read in episodic memory. Best-effort."""
     try:
         event = {
             "agent_id": "code-tool", "session_id": tool,

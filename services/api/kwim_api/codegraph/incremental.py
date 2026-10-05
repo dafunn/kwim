@@ -1,9 +1,7 @@
 """File discovery + content-hash incremental support.
 
-Walks a checked-out repo for source files, computes an xxh3 content hash per file
-(cheap, matches the reference), and exposes the current git commit. The extractor
-compares hashes against what's already in the graph (FalkorStore.code_files_by_hash)
-to re-extract only changed files.
+Walks a checked-out repo for source files, hashes each with xxh3, and reads the
+current git commit.
 """
 from __future__ import annotations
 
@@ -15,11 +13,8 @@ import xxhash
 
 from ..config import settings
 
-# Discovery scope is configuration (codegraph.discovery.* in kwim.defaults.yaml,
-# env-overridable). Defaults: Python-first; tests excluded (their fixtures pollute
-# call-graph hub detection - a mock called 30x in a test module is not a hub);
-# per-repo .gitignore + .cgignore honored (gitignore syntax) so vendored/snapshot
-# trees the agents shouldn't reason about stay out of the graph.
+# Discovery scope comes from codegraph.discovery.* in kwim.defaults.yaml. See
+# docs/DESIGN.md, "The code graph".
 LANG_BY_EXT = settings.cg_lang_by_ext
 _SKIP_DIRS = settings.cg_skip_dirs
 _IGNORE_FILES = settings.cg_ignore_files
@@ -48,9 +43,7 @@ def content_hash(data: bytes) -> str:
 
 
 def git_head(repo_dir: str) -> str:
-    """Resolve the checked-out commit SHA. Tries the git binary, then falls back to
-    reading .git directly (the extractor image has no git binary, but the clone's
-    .git is present on the shared cache volume)."""
+    """Resolve the checked-out commit SHA, with the git binary or by reading .git."""
     try:
         out = subprocess.run(
             ["git", "-C", repo_dir, "rev-parse", "HEAD"],
@@ -91,17 +84,13 @@ def _git_head_from_files(repo_dir: str) -> str:
 def discover(repo_dir: str) -> list[tuple[str, str]]:
     """Return (rel_path, lang) for every indexable source file under repo_dir.
 
-    Honors _SKIP_DIRS (always), test-file naming, and the repo's .gitignore +
-    .cgignore (gitignore syntax) so vendored/snapshot content the agents shouldn't
-    reason about (e.g. a vendored snapshot tree) stays out of the graph.
+    Skips _SKIP_DIRS, test files, and paths matched by .gitignore or .cgignore.
     """
     spec = _load_ignore_spec(repo_dir)
     out: list[tuple[str, str]] = []
     for root, dirs, files in os.walk(repo_dir):
         rel_root = os.path.relpath(root, repo_dir)
-        # Prune dirs: hardcoded skips + ignore-matched (match with a trailing slash
-        # so gitignore dir patterns apply). Pruning the dir avoids walking thousands
-        # of vendored files.
+        # Skip ignored directories (matched with a trailing slash, as gitignore expects).
         kept = []
         for d in dirs:
             if d in _SKIP_DIRS:

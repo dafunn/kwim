@@ -3,6 +3,7 @@
   - GET /v1/memory/episodic - windowed, team-scoped batch read endpoint.
 """
 import datetime
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -37,6 +38,10 @@ class _FakePool:
     def __init__(self, rows: list[dict]):
         self.last_cursor: _FakeCursor | None = None
         self._rows = rows
+
+    @asynccontextmanager
+    async def connection(self):
+        yield self
 
     def cursor(self, row_factory=None):
         self.last_cursor = _FakeCursor(self._rows)

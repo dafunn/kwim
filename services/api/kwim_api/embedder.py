@@ -12,11 +12,7 @@ class Embedder:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed each text, returning one vector per input in the same order.
-
-        Callers pair the response with the input batch positionally, by `zip` or
-        by index, and both forms drop the tail of a short response without error.
-        The length check keeps that guarantee here rather than at each call site.
-        """
+        Raises if the response length differs, since callers pair by position."""
         r = await self._http.post(f"{self._url}/embed", json={"inputs": texts})
         r.raise_for_status()
         vectors = r.json()

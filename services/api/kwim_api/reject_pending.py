@@ -1,16 +1,10 @@
-"""Reject stale unresolved pending review proposals (queue cleanup).
+"""Resolve unresolved review proposals as 'rejected', filtered by proposer
+source_kind (default `repo_sync`, the code distiller). The rows are kept.
 
-The pre-commit review queue accumulates one `pending_proposals` row per proposal the
-gate routes to review. This bulk-resolves the unresolved ones as 'rejected' (not a
-hard delete; the audit row stays), filtered by proposer source_kind so it only touches
-the intended ones (default `repo_sync` = the code distiller, leaving agent/episodic
-proposals alone).
-
-Standalone admin CLI (run via /app/with-secrets.sh, like kwim_api.forget). Dry-run by
-default; mutation needs --commit, and --confirm-count N (no-TTY) gates on the count
-you reviewed.
     python -m kwim_api.reject_pending --team <team> [--source-kind repo_sync] \
         [--commit --confirm-count N]
+
+Dry run by default.
 """
 from __future__ import annotations
 
@@ -60,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--team", required=True)
     ap.add_argument("--source-kind", default="repo_sync",
                     help="filter by proposer source_kind (default repo_sync = code "
-                    "distiller; pass '' for ANY)")
+                    "distiller; pass '' for any source_kind)")
     ap.add_argument("--reason", default="bulk cleanup: stale/duplicate code distillation")
     ap.add_argument("--commit", action="store_true", help="apply (default: dry-run)")
     ap.add_argument("--confirm-count", type=int, default=None,

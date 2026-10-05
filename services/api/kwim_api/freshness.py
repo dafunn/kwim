@@ -1,15 +1,5 @@
-"""Deterministic freshness computation for :Fact nodes.
-
-Resolution order for decay_class:
-  1. Explicit override from FactProposal (validated)
-  2. fact_type-map fallback
-  3. "slow" default
-
-Freshness thresholds (KWIM computes, agent consumes):
-  age/half_life < 0.5  -> "fresh"
-  age/half_life < 1.0  -> "aging"
-  age/half_life >= 1.0  -> "stale"
-  permanent            -> always "fresh"
+"""Freshness for :Fact nodes: decay_class resolution and the fresh / aging /
+stale bands. See docs/DESIGN.md, "Retrieval".
 """
 from __future__ import annotations
 
@@ -17,8 +7,7 @@ from datetime import UTC, datetime
 
 VALID_DECAY_CLASSES: frozenset[str] = frozenset({"permanent", "slow", "fast"})
 
-# Best-effort map; open fact_type vocabulary means this is a fallback, not the
-# primary mechanism - the proposer-declared decay_class is primary.
+# Fallback decay_class by fact_type, used when the proposer gives none.
 _DECAY_CLASS_BY_TYPE: dict[str, str] = {
     "entity_attribute": "permanent",
     "trend":            "fast",
@@ -37,11 +26,7 @@ def resolve_decay_class(fact_type: str, override: str | None = None) -> str:
 
 
 def _to_dt(v) -> datetime | None:
-    """Normalize a stored timestamp to a timezone-aware datetime.
-
-    FalkorDB `timestamp()` returns epoch milliseconds; older/test paths may pass
-    ISO strings. Returns None for empty/missing/unparseable values.
-    """
+    """Normalize epoch milliseconds or an ISO string to an aware datetime, or None."""
     if v is None:
         return None
     s = str(v)

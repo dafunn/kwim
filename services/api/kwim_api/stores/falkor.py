@@ -1,14 +1,9 @@
 """FalkorDB store - the queryable projection: K + W graph, semantic vector index,
 and working-memory TTL keys.
 
-Tenancy: graph-per-tenant (`kwim_<team>`). The KWIM service owns the graph schema -
-it ensures constraints + the vector index exist on first touch of a team's graph
-(graph-init is the service's job, not the provisioner's). Working memory uses plain
-Redis TTL keys on the same instance, not graph nodes.
-
-Universe graph: `kwim_universe` is a peer tenant graph holding scope=universe rules
-promoted from team graphs. It is accessed via the same `_graph` path with the
-literal pseudo-team "universe". `query_rules` merges team + universe results.
+One graph per team (`kwim_<team>`), whose indexes this store creates on first
+use; `kwim_universe` is reached as the pseudo-team "universe". Working memory is
+Redis TTL keys on the same instance.
 """
 import json as _json
 import logging
@@ -21,7 +16,7 @@ from falkordb.asyncio import FalkorDB
 
 from ..config import settings
 from ..freshness import resolve_decay_class
-from .falkor_code import CodeGraphStore
+from .falkor_code import CodeGraphStore, _code_graph_name
 
 _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -37,11 +32,10 @@ def _graph_name(team: str) -> str:
     return f"kwim_{team}"
 
 
-# Shared :Fact read projection. `query_facts` (tag/structured) and `search_facts`
-# (semantic KNN) must return the identical row shape - both feed `_enrich_facts`
-# and the `Fact` model, and memory/context unions their results into one list.
+# :Fact read projection shared by query_facts and search_facts, whose rows
+# memory/context combines. `commit_seq` is the admin listing's cursor key.
 _FACT_FIELDS = ("id", "statement", "fact_type", "status", "created_at", "about",
-                "decay_class", "source_kind", "last_verified_at")
+                "decay_class", "source_kind", "last_verified_at", "commit_seq")
 
 
 def _fact_projection(alias: str) -> str:
@@ -55,16 +49,14 @@ def _fact_row(r: Any) -> dict:
         "created_at": str(r[4]), "about": list(r[5]) if r[5] else [],
         "decay_class": r[6] or "slow", "source_kind": r[7] or None,
         "last_verified_at": str(r[8]) if r[8] is not None else None,
+        "commit_seq": r[9],
     }
 
 
 # Graph schema (FalkorDB DDL)
-#   - range indexes via `CREATE INDEX FOR (n:L) ON (n.p)` - no `IF NOT EXISTS`;
-#     re-running throws "already indexed" (caught below for restart-idempotency).
-#   - uniqueness is provided by MERGE-on-id in the writers, so hard
-#     GRAPH.CONSTRAINTs are deferred (they need a supporting index + the redis-level
-#     GRAPH.CONSTRAINT command; not needed for v1 correctness).
-#   - the vector index powers semantic Memory recall.
+#   - range indexes; re-creating one raises "already indexed", which is ignored.
+#   - writers MERGE on id; there are no uniqueness constraints.
+#   - vector indexes for semantic items and facts.
 _INIT_CYPHER = [
     "CREATE INDEX FOR (f:Fact) ON (f.id)",
     "CREATE INDEX FOR (f:Fact) ON (f.status)",
@@ -89,8 +81,7 @@ class FalkorStore(CodeGraphStore):
         self._inited: set[str] = set()
 
     async def connect(self) -> None:
-        # Discrete kwargs (no redis:// URL) so if the FalkorDB password is base64 and
-        # contains +/= it can't corrupt a URL.
+        # Discrete arguments, not a URL; see docs/DESIGN.md, "Configuration".
         self._db = FalkorDB(
             host=settings.falkor_host, port=settings.falkor_port,
             password=settings.falkor_password or None,
@@ -122,33 +113,59 @@ class FalkorStore(CodeGraphStore):
     async def _graph(self, team: str, graph_name: str | None = None):
         """Return the team's K/W graph, ensuring its schema exists (once per process).
 
-        `graph_name` overrides the derived name (used by rebuild to target a temp
-        graph while keeping the team's identifier for validation).
+        `graph_name` overrides the derived name (rebuild's temp graph).
         """
         name = graph_name or _graph_name(team)
         g = self._db.select_graph(name)
         await self._ensure_schema(g, name, _INIT_CYPHER)
         return g
 
+    # --- Team provisioning -------------------
+
+    async def init_team_graph(self, team: str) -> None:
+        """Touch kwim_<team> so _ensure_schema runs _INIT_CYPHER immediately,
+        rather than on the first write. The code graph is created by the extractor."""
+        await self._graph(team)
+
+    async def drop_team_graphs(self, team: str) -> dict[str, bool]:
+        """Destructive (team destroy only): delete kwim_<team> and
+        kwim_<team>_code; either may already be absent. Clears both from the _inited
+        cache so a re-provisioned team gets its indexes again.
+        """
+        results: dict[str, bool] = {}
+        for name in (_graph_name(team), _code_graph_name(team)):
+            try:
+                await self._db.select_graph(name).delete()
+                results[name] = True
+            except Exception as exc:
+                if "not exist" in str(exc).lower() or "unknown graph" in str(exc).lower():
+                    results[name] = False
+                else:
+                    raise
+            finally:
+                self._inited.discard(name)
+        return results
+
     async def materialize_fact(
         self, team: str, fact: dict[str, Any], provenance: dict[str, Any],
         graph_name: str | None = None, embedding: list[float] | None = None,
+        created_at: int | None = None,
     ) -> None:
         """Create/upsert a :Fact node + its provenance edges (gate commit path).
 
-        `embedding` is optional (the screen sets it; screen-skipped facts and pre-index
-        facts leave it absent - the node simply lacks the property and won't
-        appear in query_similar_facts KNN results until a rebuild re-embeds it).
+        `embedding` is optional. `created_at` (epoch milliseconds) is set only when
+        the node is created; replay passes the row's committed_at.
         """
         g = await self._graph(team, graph_name)
         await g.query(
             "MERGE (f:Fact {id:$id}) "
+            "ON CREATE SET f.created_at = coalesce($created_at, timestamp()) "
             "SET f.statement=$statement, f.fact_type=$fact_type, f.status='current', "
-            "    f.source_kind=$source_kind, f.commit_seq=$seq, f.created_at=timestamp(), "
+            "    f.source_kind=$source_kind, f.commit_seq=$seq, "
             "    f.about=$about, f.decay_class=$decay_class",
             {"id": fact["id"], "statement": fact["statement"], "fact_type": fact["fact_type"],
              "source_kind": fact.get("source_kind", "agent_proposal"), "seq": fact["commit_seq"],
-             "about": fact.get("about", []),
+             "about": fact.get("about", []), "created_at": created_at,
              "decay_class": resolve_decay_class(fact["fact_type"], fact.get("decay_class"))},
         )
         if embedding is not None:
@@ -174,6 +191,187 @@ class FalkorStore(CodeGraphStore):
                 {"nid": fact["id"], "oid": provenance["supersedes"]},
             )
 
+    # Content properties an amend may replace, per object type.
+    AMENDABLE = {
+        "fact": ("statement", "fact_type", "about", "decay_class"),
+        "rule": ("situation", "approach", "action_pattern", "verdict", "authority",
+                 "severity", "check_tier"),
+        "semantic": ("content", "metadata"),
+    }
+
+    async def get_fact_content(self, team: str, fact_id: str) -> dict[str, Any] | None:
+        """Content properties of one :Fact, plus status. None if absent.
+
+        Feeds an amend's `previous_payload` and the current-status guard.
+        """
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (f:Fact {id:$id}) "
+            "RETURN f.statement, f.fact_type, f.about, f.decay_class, f.status",
+            {"id": fact_id},
+        )
+        if not res.result_set:
+            return None
+        r = res.result_set[0]
+        return {"statement": r[0], "fact_type": r[1], "about": list(r[2]) if r[2] else [],
+                "decay_class": r[3] or "slow", "status": r[4]}
+
+    async def get_rule_content(self, team: str, rule_id: str) -> dict[str, Any] | None:
+        """Content properties of one :Rule, plus status. None if absent."""
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (r:Rule {id:$id}) "
+            "RETURN r.situation_json, r.approach, r.action_pattern, r.verdict, "
+            "       r.authority, r.severity, r.check_tier, r.status, r.rule_type",
+            {"id": rule_id},
+        )
+        if not res.result_set:
+            return None
+        r = res.result_set[0]
+        return {"situation": _json.loads(r[0]) if r[0] else None,
+                "approach": r[1] or None, "action_pattern": r[2] or None,
+                "verdict": r[3] or None, "authority": r[4] or None,
+                "severity": r[5] or None, "check_tier": r[6] or None,
+                "status": r[7], "rule_type": r[8]}
+
+    async def get_semantic_content(self, team: str, item_id: str) -> dict[str, Any] | None:
+        """Content + metadata of one :SemanticItem. None if absent."""
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (s:SemanticItem {id:$id}) RETURN s.content, s.metadata",
+            {"id": item_id},
+        )
+        if not res.result_set:
+            return None
+        r = res.result_set[0]
+        return {"content": r[0] or "", "metadata": _json.loads(r[1]) if r[1] else {}}
+
+    async def amend_fact(
+        self, team: str, fact_id: str, payload: dict[str, Any], seq: int,
+        graph_name: str | None = None, embedding: list[float] | None = None,
+    ) -> bool:
+        """Replace a current :Fact's content in place. Returns False if no current
+        fact with that id exists. Sets `commit_seq` to the amending row.
+        """
+        g = await self._graph(team, graph_name)
+        sets = ["f.commit_seq=$seq"]
+        params: dict[str, Any] = {"id": fact_id, "seq": seq}
+        for key in self.AMENDABLE["fact"]:
+            if key in payload:
+                sets.append(f"f.{key}=${key}")
+                params[key] = (resolve_decay_class(payload.get("fact_type", ""),
+                                                   payload[key])
+                               if key == "decay_class" else payload[key])
+        res = await g.query(
+            "MATCH (f:Fact {id:$id}) WHERE f.status='current' "
+            f"SET {', '.join(sets)} RETURN f.id",
+            params,
+        )
+        if not (res.result_set and res.result_set[0][0] is not None):
+            return False
+        if embedding is not None:
+            await g.query("MATCH (f:Fact {id:$id}) SET f.embedding=vecf32($embedding)",
+                          {"id": fact_id, "embedding": embedding})
+        return True
+
+    async def amend_rule(
+        self, team: str, rule_id: str, payload: dict[str, Any], seq: int,
+        previous_situation: dict[str, Any] | None = None,
+        graph_name: str | None = None,
+    ) -> bool:
+        """Replace an approved :Rule's content in place. Returns False if no
+        approved rule with that id exists. A changed `situation` replaces the
+        promoted situation properties.
+        """
+        g = await self._graph(team, graph_name)
+        sets = ["r.commit_seq=$seq"]
+        params: dict[str, Any] = {"id": rule_id, "seq": seq}
+        removes: list[str] = []
+
+        if "situation" in payload:
+            sit = payload["situation"] or {}
+            params["situation_json"] = _json.dumps(sit) if sit else ""
+            sets.append("r.situation_json=$situation_json")
+            new_keys = set()
+            for k, v in sit.items():
+                safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+                if safe_key in self._RULE_RESERVED:
+                    log.warning("amend_rule: situation key %r collides with a reserved "
+                                "node property; kept in situation_json only", k)
+                    continue
+                new_keys.add(safe_key)
+                params[f"sit_{safe_key}"] = v
+                sets.append(f"r.{safe_key}=$sit_{safe_key}")
+            for k in (previous_situation or {}):
+                safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+                if safe_key not in self._RULE_RESERVED and safe_key not in new_keys:
+                    removes.append(f"r.{safe_key}")
+
+        for key in self.AMENDABLE["rule"]:
+            if key == "situation" or key not in payload:
+                continue
+            sets.append(f"r.{key}=${key}")
+            params[key] = payload[key] or ""
+
+        clause = f"REMOVE {', '.join(removes)} " if removes else ""
+        res = await g.query(
+            "MATCH (r:Rule {id:$id}) WHERE r.status='approved' "
+            f"{clause}SET {', '.join(sets)} RETURN r.id",
+            params,
+        )
+        return bool(res.result_set and res.result_set[0][0] is not None)
+
+    async def amend_semantic(
+        self, team: str, item_id: str, payload: dict[str, Any],
+        previous_metadata: dict[str, Any] | None = None,
+        graph_name: str | None = None, embedding: list[float] | None = None,
+    ) -> bool:
+        """Replace a :SemanticItem's content in place. Returns False if absent.
+
+        Changed metadata replaces the promoted metadata properties.
+        """
+        g = await self._graph(team, graph_name)
+        sets: list[str] = []
+        params: dict[str, Any] = {"id": item_id}
+        removes: list[str] = []
+
+        if "content" in payload:
+            sets.append("s.content=$content")
+            params["content"] = payload["content"]
+        if "metadata" in payload:
+            meta = payload["metadata"] or {}
+            params["metadata_json"] = _json.dumps(meta)
+            sets.append("s.metadata=$metadata_json")
+            new_keys = set()
+            for k, v in meta.items():
+                if k in self._SEMANTIC_RESERVED:
+                    continue
+                safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+                new_keys.add(safe_key)
+                params[f"meta_{safe_key}"] = v
+                sets.append(f"s.{safe_key}=$meta_{safe_key}")
+            for k in (previous_metadata or {}):
+                if k in self._SEMANTIC_RESERVED:
+                    continue
+                safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+                if safe_key not in new_keys:
+                    removes.append(f"s.{safe_key}")
+        if not sets:
+            return False
+
+        clause = f"REMOVE {', '.join(removes)} " if removes else ""
+        res = await g.query(
+            "MATCH (s:SemanticItem {id:$id}) "
+            f"{clause}SET {', '.join(sets)} RETURN s.id",
+            params,
+        )
+        if not (res.result_set and res.result_set[0][0] is not None):
+            return False
+        if embedding is not None:
+            await g.query("MATCH (s:SemanticItem {id:$id}) SET s.embedding=vecf32($embedding)",
+                          {"id": item_id, "embedding": embedding})
+        return True
+
     async def query_facts(
         self, team: str, fact_type: str | None, status: str, limit: int,
         about: list[str] | None = None, source_kind: str | None = None,
@@ -198,14 +396,83 @@ class FalkorStore(CodeGraphStore):
         res = await g.query(cypher, params)
         return [_fact_row(r) for r in res.result_set]
 
-    async def reaffirm_fact(self, team: str, fact_id: str) -> bool:
-        """Stamp last_verified_at = now on a current :Fact. Non-destructive;
-        does not write commit_log. Returns True if the fact existed."""
+    def _facts_admin_where(
+        self, *, status: str | None, fact_type: str | None, source_kind: str | None,
+        about: list[str] | None, q: str | None, cursor: dict[str, Any] | None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
+        if status is not None:
+            clauses.append("f.status=$status")
+            params["status"] = status
+        if fact_type is not None:
+            clauses.append("f.fact_type=$fact_type")
+            params["fact_type"] = fact_type
+        if source_kind is not None:
+            clauses.append("f.source_kind=$source_kind")
+            params["source_kind"] = source_kind
+        if about:
+            clauses.append(
+                "ANY(a IN f.about WHERE ANY(qa IN $about WHERE toLower(a) = toLower(qa)))")
+            params["about"] = about
+        if q is not None:
+            clauses.append("toLower(f.statement) CONTAINS toLower($q)")
+            params["q"] = q
+        if cursor is not None:
+            clauses.append(
+                "(coalesce(f.commit_seq, 0) > $cseq OR "
+                " (coalesce(f.commit_seq, 0) = $cseq AND f.id > $cid))")
+            params["cseq"] = cursor["seq"]
+            params["cid"] = cursor["id"]
+        return clauses, params
+
+    async def query_facts_admin(
+        self, team: str, *, status: str | None = None, fact_type: str | None = None,
+        source_kind: str | None = None, about: list[str] | None = None,
+        q: str | None = None, cursor: dict[str, Any] | None = None, limit: int = 50,
+    ) -> list[dict]:
+        """Cross-status, cursor-paginated fact browse for the admin console.
+
+        Ordered `coalesce(f.commit_seq, 0) ASC, f.id ASC`.
+        """
         g = await self._graph(team)
+        clauses, params = self._facts_admin_where(
+            status=status, fact_type=fact_type, source_kind=source_kind,
+            about=about, q=q, cursor=cursor)
+        params["limit"] = limit
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        cypher = (
+            f"MATCH (f:Fact) {where}"
+            f"RETURN {_fact_projection('f')} "
+            "ORDER BY coalesce(f.commit_seq, 0) ASC, f.id ASC LIMIT $limit"
+        )
+        res = await g.query(cypher, params)
+        return [_fact_row(r) for r in res.result_set]
+
+    async def count_facts_admin(
+        self, team: str, *, status: str | None = None, fact_type: str | None = None,
+        source_kind: str | None = None, about: list[str] | None = None,
+        q: str | None = None,
+    ) -> int:
+        g = await self._graph(team)
+        clauses, params = self._facts_admin_where(
+            status=status, fact_type=fact_type, source_kind=source_kind,
+            about=about, q=q, cursor=None)
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        res = await g.query(f"MATCH (f:Fact) {where}RETURN count(f)", params)
+        return int(res.result_set[0][0]) if res.result_set else 0
+
+    async def reaffirm_fact(self, team: str, fact_id: str, verified_at: int | None = None,
+                            graph_name: str | None = None) -> bool:
+        """Stamp last_verified_at on a current :Fact. Non-destructive; does not write
+        commit_log. Returns True if the fact existed and was current.
+        `verified_at` (epoch milliseconds) defaults to now.
+        """
+        g = await self._graph(team, graph_name)
         res = await g.query(
             "MATCH (f:Fact {id:$id}) WHERE f.status='current' "
-            "SET f.last_verified_at = timestamp() RETURN f.id",
-            {"id": fact_id},
+            "SET f.last_verified_at = coalesce($verified_at, timestamp()) RETURN f.id",
+            {"id": fact_id, "verified_at": verified_at},
         )
         return bool(res.result_set and res.result_set[0][0] is not None)
 
@@ -215,18 +482,13 @@ class FalkorStore(CodeGraphStore):
     ) -> list[dict]:
         """KNN over :Fact embeddings - powered by the :Fact vector index.
 
-        Returns only status='current' facts, ascending distance (lower = closer),
-        mirroring query_semantic's KNN shape. Facts without an embedding (screen-skipped
-        or pre-index) are absent from the index and won't appear in results.
-
-        Scoped mode (about + fact_type): restricts candidates to current facts of the
-        same fact_type whose about set contains every proposal about ref, computing
-        cosine distance server-side over the exact candidate set.
+        Current facts only, nearest first. With `about` and `fact_type`, scores only
+        facts of that type whose `about` contains every given ref. The gate's
+        duplicate screen; see docs/DESIGN.md, "The governance gate".
         """
         g = await self._graph(team)
         if about and fact_type:
-            # Exact, server-side scoped screen. Filters first, then computes
-            # vec.cosineDistance over the small matching set - no KNN top-k cliff.
+            # Filter, then score the matching facts.
             res = await g.query(
                 "MATCH (f:Fact) "
                 "WHERE f.status = 'current' AND f.fact_type = $fact_type "
@@ -248,8 +510,7 @@ class FalkorStore(CodeGraphStore):
                     {"k": k, "qvec": vector},
                 )
             except Exception as exc:
-                # Vector index may not have any vectors yet (empty team, or no facts
-                # have been embedded). Return [] rather than crashing the gate.
+                # An empty vector index raises; treat it as no matches.
                 log.warning("falkor: query_similar_facts failed (likely empty index): %s", exc)
                 return []
         return [
@@ -262,23 +523,9 @@ class FalkorStore(CodeGraphStore):
         about: list[str] | None = None, fact_type: str | None = None,
     ) -> list[dict]:
         """Semantic KNN over :Fact embeddings for the read path - Tier 1 retrieval
-        for Knowledge, and the counterpart to `query_facts`' structured filter.
-        `query_facts` answers "give me the facts tagged X"; this answers "what do we
-        know that relates to this?" when the caller cannot know the tag.
-
-        Deliberately separate from `query_similar_facts`, which serves the gate's
-        write-side dedup screen. That one scopes with AND-all, case-sensitive `about`
-        matching because it is deciding whether two proposals are the same fact;
-        this one mirrors `query_facts`' case-insensitive ANY-membership so `about`
-        means the same thing on both read paths. Keeping them apart means tuning
-        retrieval can never silently change what the gate rejects as a duplicate.
-
-        `score` is a cosine distance - lower = closer (identical -> 0.0), matching
-        `query_semantic`, so callers rank ascending.
-
-        Returns only status='current' facts. Facts with no embedding (committed
-        while the embedder was down - the gate fails open - or predating the index)
-        cannot match; `kwim_api.backfill_embeddings` is the repair path.
+        for Knowledge. `about` matches as query_facts does (any ref, case-insensitive).
+        Current facts only; `score` is a cosine distance. See docs/DESIGN.md,
+        "Retrieval".
         """
         g = await self._graph(team)
         params: dict[str, Any] = {"k": limit, "qvec": qvec}
@@ -292,10 +539,7 @@ class FalkorStore(CodeGraphStore):
             params["about"] = about
 
         if filters:
-            # Filter first, then score what survives. Going through the vector index
-            # here would apply the filter after the top-k cut, so a tag whose facts
-            # sit outside the global top-k would return nothing - the same top-k
-            # cliff `query_similar_facts`' scoped mode avoids.
+            # Filter, then score the matching facts.
             res = await g.query(
                 "MATCH (f:Fact) WHERE f.status='current' AND f.embedding IS NOT NULL "
                 "AND " + " AND ".join(filters) + " "
@@ -321,8 +565,7 @@ class FalkorStore(CodeGraphStore):
 
     async def facts_missing_embedding(self, team: str, limit: int = 1000) -> list[dict]:
         """Current facts with no `embedding` property - invisible to `search_facts`
-        until backfilled. Ordered by commit_seq so repeated runs are deterministic.
-        See `kwim_api.backfill_embeddings`."""
+        until backfilled. Ordered by commit_seq."""
         g = await self._graph(team)
         res = await g.query(
             "MATCH (f:Fact) WHERE f.status='current' AND f.embedding IS NULL "
@@ -336,9 +579,7 @@ class FalkorStore(CodeGraphStore):
     ) -> bool:
         """Attach an embedding to an existing :Fact in place (backfill path).
 
-        Non-destructive - touches only the vector property, leaving the statement,
-        status and every provenance edge alone. Reads back so a silent no-op (id
-        gone, write rejected) surfaces to the caller rather than counting as done.
+        Touches only the vector, and reads it back to confirm the write.
         """
         g = await self._graph(team)
         await g.query(
@@ -354,8 +595,7 @@ class FalkorStore(CodeGraphStore):
     async def get_fact_provenance(self, team: str, fact_id: str) -> dict | None:
         """One fact + its immediate provenance edges (knowledge.facts/{id}).
 
-        Returns None if the fact is not in the team graph. Evidence is returned as
-        episodic_event_id references (not hydrated from Postgres).
+        None if absent. Evidence is returned as episodic_event_id references.
         """
         g = await self._graph(team)
         res = await g.query(
@@ -382,12 +622,8 @@ class FalkorStore(CodeGraphStore):
 
     async def audit_fact(self, team: str, fact_id: str) -> list[dict]:
         """Provenance walk for knowledge.audit/{id}: the fact + its full version
-        chain (SUPERSEDES* lineage), newest-first, each version carrying its own
-        evidence (episodic_event_id refs) + proposing agent.
-
-        v1 is not point-in-time - `?at=` is deferred (the graph has no
-        valid_from/superseded_at; the commit_log is the authoritative time source).
-        Returns [] if the fact is not in the team graph.
+        chain (SUPERSEDES* lineage), newest first, each with its evidence and
+        proposing agent. [] if the fact is absent.
         """
         g = await self._graph(team)
         res = await g.query(
@@ -415,8 +651,7 @@ class FalkorStore(CodeGraphStore):
 
     # --- Wisdom materialization + read paths ---
 
-    # :Rule node properties the situation must not overwrite. A situation key
-    # colliding with one of these is skipped (kept in situation_json only).
+    # :Rule properties a situation key may not overwrite (kept in situation_json only).
     _RULE_RESERVED = {
         "id", "rule_type", "status", "scope", "evidence_count", "commit_seq",
         "created_at", "situation_json", "approach", "action_pattern", "verdict",
@@ -424,18 +659,12 @@ class FalkorStore(CodeGraphStore):
         "promoted_from_team",
     }
 
-    async def materialize_rule(self, team: str, rule: dict[str, Any], provenance: dict[str, Any], graph_name: str | None = None) -> None:
+    async def materialize_rule(self, team: str, rule: dict[str, Any], provenance: dict[str, Any], graph_name: str | None = None, created_at: int | None = None) -> None:
         """Create/upsert a :Rule node + its provenance edges (gate commit path).
 
-        Mirrors materialize_fact. `rule` must include at minimum: id, rule_type,
-        status, scope, evidence_count, commit_seq. Advisory rules carry a situation
-        dict + approach; constraint rules carry action_pattern, verdict, authority,
-        severity, check_tier. Missing optional fields default to empty string/None
-        so the node is always well-formed for replay.
-
-        Every situation key is promoted to a direct node property (the
-        materialize_semantic pattern) so query_rules can WHERE-filter on any
-        team-defined key. situation_json remains the full-fidelity truth.
+        `rule` needs id, rule_type, status, scope, evidence_count and commit_seq;
+        missing optional fields default to empty. Situation keys are also copied to
+        node properties for filtering. `created_at` is set only on creation.
         """
         g = await self._graph(team, graph_name)
         sit = rule.get("situation") or {}
@@ -455,6 +684,7 @@ class FalkorStore(CodeGraphStore):
             "check_tier": rule.get("check_tier") or "",
             "promoted_from_id": rule.get("promoted_from_id") or "",
             "promoted_from_team": rule.get("promoted_from_team") or "",
+            "created_at": created_at,
         }
         sit_sets: list[str] = []
         for k, v in sit.items():
@@ -467,9 +697,9 @@ class FalkorStore(CodeGraphStore):
             params[f"sit_{safe_key}"] = v
             sit_sets.append(f"r.{safe_key}=$sit_{safe_key}")
         set_clause = (
+            "ON CREATE SET r.created_at = coalesce($created_at, timestamp()) "
             "SET r.rule_type=$rule_type, r.status=$status, r.scope=$scope, "
             "    r.evidence_count=$evidence_count, r.commit_seq=$seq, "
-            "    r.created_at=timestamp(), "
             "    r.situation_json=$situation_json, "
             "    r.approach=$approach, "
             "    r.action_pattern=$action_pattern, r.verdict=$verdict, "
@@ -498,12 +728,8 @@ class FalkorStore(CodeGraphStore):
     ) -> list[dict]:
         """Query approved :Rule nodes from one graph, tagged with source_tag.
 
-        `situation` is an open dict of team-defined key/values, AND-matched
-        against the promoted situation properties (see materialize_rule).
-        Keys colliding with reserved node properties are ignored.
-
-        Returns empty list if the graph doesn't exist yet (tolerates missing
-        universe graph on first deploy before any promotion has occurred).
+        `situation` keys must all match; reserved keys are ignored. [] if the graph
+        does not exist.
         """
         try:
             g = await self._graph(team)
@@ -560,13 +786,8 @@ class FalkorStore(CodeGraphStore):
     ) -> list[dict]:
         """Return approved rules from the team graph + the universe graph, merged.
 
-        - `situation` is an open dict of team-defined key/values, AND-matched
-          against promoted situation properties. None/empty = no situation filter.
-        - Team rules and universe rules are both returned, tagged with source.
-        - Dedup: when a team rule has been promoted, the universe copy carries
-          `promoted_from_id`; if a team rule's id appears as a universe copy's
-          promoted_from_id, the team original is suppressed (the universe copy wins).
-        - Sorted evidence_count DESC overall after merge.
+        Each is tagged with its source. A team rule with a promoted universe copy is
+        dropped in favour of the copy. Sorted by evidence_count, highest first.
         """
         team_rows = await self._query_rules_from_graph(
             team, situation, limit, source_tag="team")
@@ -581,6 +802,101 @@ class FalkorStore(CodeGraphStore):
         merged = [r for r in team_rows if r["id"] not in promoted_ids] + universe_rows
         merged.sort(key=lambda r: r.get("evidence_count", 0), reverse=True)
         return merged[:limit]
+
+    def _rules_admin_where(
+        self, *, status: str | None, rule_type: str | None, scope: str | None,
+        cursor: dict[str, Any] | None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
+        if status is not None:
+            clauses.append("r.status=$status")
+            params["status"] = status
+        if rule_type is not None:
+            clauses.append("r.rule_type=$rule_type")
+            params["rule_type"] = rule_type
+        if scope is not None:
+            clauses.append("r.scope=$scope")
+            params["scope"] = scope
+        if cursor is not None:
+            clauses.append(
+                "(coalesce(r.commit_seq, 0) > $cseq OR "
+                " (coalesce(r.commit_seq, 0) = $cseq AND r.id > $cid))")
+            params["cseq"] = cursor["seq"]
+            params["cid"] = cursor["id"]
+        return clauses, params
+
+    async def query_rules_admin(
+        self, team: str, *, status: str | None = None, rule_type: str | None = None,
+        scope: str | None = None, cursor: dict[str, Any] | None = None, limit: int = 50,
+    ) -> list[dict]:
+        """Cross-status rule browse for the admin console - pending, deprecated, and
+        retracted rules included. One graph only. Ordered
+        `coalesce(r.commit_seq, 0) ASC, r.id ASC`.
+        """
+        g = await self._graph(team)
+        clauses, params = self._rules_admin_where(
+            status=status, rule_type=rule_type, scope=scope, cursor=cursor)
+        params["limit"] = limit
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        res = await g.query(
+            f"MATCH (r:Rule) {where}"
+            "RETURN r.id, r.rule_type, r.situation_json, r.approach, r.evidence_count, "
+            "       r.status, r.scope, r.action_pattern, r.verdict, r.authority, "
+            "       r.severity, r.check_tier, r.promoted_from_id, r.commit_seq "
+            "ORDER BY coalesce(r.commit_seq, 0) ASC, r.id ASC LIMIT $limit",
+            params,
+        )
+        rows = []
+        for r in res.result_set:
+            sit_raw = r[2]
+            rows.append({
+                "id": r[0], "rule_type": r[1],
+                "situation": _json.loads(sit_raw) if sit_raw else None,
+                "approach": r[3] or None, "evidence_count": r[4] or 0, "status": r[5],
+                "scope": r[6] or "team", "action_pattern": r[7] or None, "verdict": r[8] or None,
+                "authority": r[9] or None, "severity": r[10] or None, "check_tier": r[11] or None,
+                "promoted_from_id": r[12] or None, "commit_seq": r[13],
+            })
+        return rows
+
+    async def count_rules_admin(
+        self, team: str, *, status: str | None = None, rule_type: str | None = None,
+        scope: str | None = None,
+    ) -> int:
+        g = await self._graph(team)
+        clauses, params = self._rules_admin_where(
+            status=status, rule_type=rule_type, scope=scope, cursor=None)
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        res = await g.query(f"MATCH (r:Rule) {where}RETURN count(r)", params)
+        return int(res.result_set[0][0]) if res.result_set else 0
+
+    async def get_rule_provenance(self, team: str, rule_id: str) -> dict[str, Any] | None:
+        """One rule (any status) + its provenance edges - the rule-detail counterpart
+        of `get_fact_provenance`. None if the rule is not in the team graph."""
+        g = await self._graph(team)
+        res = await g.query(
+            "MATCH (r:Rule {id:$id}) "
+            "OPTIONAL MATCH (r)-[:PROPOSED_BY]->(a:Agent) "
+            "OPTIONAL MATCH (r)-[:LEARNED_FROM]->(e:Evidence) "
+            "RETURN r.id, r.rule_type, r.situation_json, r.approach, r.evidence_count, "
+            "       r.status, r.scope, r.action_pattern, r.verdict, r.authority, "
+            "       r.severity, r.check_tier, r.promoted_from_id, r.promoted_from_team, "
+            "       a.id, collect(DISTINCT e.episodic_event_id)",
+            {"id": rule_id},
+        )
+        if not res.result_set:
+            return None
+        r = res.result_set[0]
+        sit_raw = r[2]
+        return {
+            "id": r[0], "rule_type": r[1], "situation": _json.loads(sit_raw) if sit_raw else None,
+            "approach": r[3] or None, "evidence_count": r[4] or 0, "status": r[5],
+            "scope": r[6] or "team", "action_pattern": r[7] or None, "verdict": r[8] or None,
+            "authority": r[9] or None, "severity": r[10] or None, "check_tier": r[11] or None,
+            "promoted_from_id": r[12] or None, "promoted_from_team": r[13] or None,
+            "proposed_by": r[14], "learned_from": [x for x in (r[15] or []) if x is not None],
+        }
 
     async def get_rule(self, team: str, rule_id: str) -> dict[str, Any] | None:
         """Fetch a single :Rule node by id. Returns None if absent or not approved."""
@@ -600,8 +916,7 @@ class FalkorStore(CodeGraphStore):
     async def reinforce_rule(self, team: str, rule_id: str, new_evidence: list[str], seq: int, graph_name: str | None = None) -> bool:
         """Increment a :Rule's evidence_count and attach new LEARNED_FROM edges.
 
-        Returns True on success, False if the rule is absent or not approved
-        (caller should reject the proposal in that case).
+        False if the rule is absent or not approved.
         """
         try:
             g = await self._graph(team, graph_name)
@@ -650,9 +965,7 @@ class FalkorStore(CodeGraphStore):
     ) -> tuple[str, str] | None:
         """Locate a committed :Fact or :Rule by id. Returns (object_type, status) or None.
 
-        When `object_type` is given, looks up that label only (the MM-button path,
-        where the type was recorded at notify time). Otherwise checks both labels
-        (the REST path, where the caller only has the object_id).
+        Looks up only `object_type`'s label when given, otherwise both.
         """
         g = await self._graph(team)
         if object_type:
@@ -679,11 +992,7 @@ class FalkorStore(CodeGraphStore):
     async def retract_object(
         self, team: str, object_type: str, object_id: str, graph_name: str | None = None,
     ) -> None:
-        """Flip a committed :Fact/:Rule to status='retracted' (governed forgetting).
-
-        Mirrors the existing supersede path's `status='superseded'` flip.
-        `query_facts`/`query_rules` filter on `status='current'`/`'approved'`, so a
-        retracted object stops being served immediately."""
+        """Set a committed :Fact/:Rule's status to 'retracted'."""
         label = "Fact" if object_type == "fact" else "Rule"
         g = await self._graph(team, graph_name)
         await g.query(f"MATCH (n:{label} {{id:$id}}) SET n.status='retracted'", {"id": object_id})
@@ -711,27 +1020,69 @@ class FalkorStore(CodeGraphStore):
         v = await conn.get(f"kwim:{_graph_name(team)}:{session}:{key}")
         return v.decode() if isinstance(v, bytes) else v
 
-    # --- proposal status tracking (Redis; committed objects live in commit_log) ---
-    # Shared between the API (on propose) and the gate consumer (on resolve). TTL'd:
-    # the durable record of what committed is the Postgres commit_log, not this.
+    async def working_list(self, team: str, session: str) -> list[dict]:
+        """Key + TTL for every working-memory key under one session (diagnostic;
+        values are not returned). Uses SCAN, which does not block the shared instance."""
+        conn = self._db.connection
+        prefix = f"kwim:{_graph_name(team)}:{session}:"
+        rows: list[dict] = []
+        cursor = 0
+        while True:
+            cursor, keys = await conn.scan(cursor=cursor, match=f"{prefix}*", count=100)
+            for raw_key in keys:
+                key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+                ttl = await conn.ttl(key)
+                rows.append({
+                    "session": session, "key": key[len(prefix):],
+                    "ttl_seconds": ttl if ttl is not None and ttl >= 0 else None,
+                })
+            if cursor == 0:
+                break
+        return rows
+
+    # --- proposal status (Redis, with a TTL), set on propose and on resolve ---
     async def proposal_set(self, proposal_id: str, doc: dict[str, Any], ttl: int = 7 * 24 * 3600) -> None:
         import json as _json
         await self._db.connection.set(f"kwim:proposal:{proposal_id}", _json.dumps(doc), ex=ttl)
 
+    # --- Preview tokens: TTL'd, consumed with GETDEL ---
+
+    async def forget_preview_set(self, token: str, doc: dict[str, Any], ttl: int) -> None:
+        import json as _json
+        await self._db.connection.set(
+            f"kwim:forget-preview:{token}", _json.dumps(doc), ex=ttl)
+
+    async def destroy_preview_set(self, token: str, doc: dict[str, Any], ttl: int) -> None:
+        import json as _json
+        await self._db.connection.set(
+            f"kwim:destroy-preview:{token}", _json.dumps(doc), ex=ttl)
+
+    async def destroy_preview_getdel(self, token: str) -> dict[str, Any] | None:
+        import json as _json
+        raw = await self._db.connection.execute_command(
+            "GETDEL", f"kwim:destroy-preview:{token}")
+        if raw is None:
+            return None
+        return _json.loads(raw if isinstance(raw, str) else raw.decode())
+
+    async def forget_preview_getdel(self, token: str) -> dict[str, Any] | None:
+        import json as _json
+        raw = await self._db.connection.execute_command(
+            "GETDEL", f"kwim:forget-preview:{token}")
+        if raw is None:
+            return None
+        return _json.loads(raw if isinstance(raw, str) else raw.decode())
+
     # --- Semantic memory (vector index) ---
 
-    # Node properties reserved by the SemanticItem schema; metadata keys with these
-    # names are not promoted to direct properties (they stay inside metadata JSON).
+    # SemanticItem properties a metadata key may not overwrite.
     _SEMANTIC_RESERVED = {"id", "content", "embedding", "metadata", "created_at"}
 
-    async def materialize_semantic(self, team: str, item: dict[str, Any], graph_name: str | None = None) -> None:
+    async def materialize_semantic(self, team: str, item: dict[str, Any], graph_name: str | None = None, created_at: int | None = None) -> None:
         """Create/upsert a :SemanticItem node with its vector.
 
-        Idempotent on id (the episodic event_id is reused as the SemanticItem id
-        so redelivery cannot duplicate).
-
-        Promotes metadata keys to node properties so Cypher WHERE clauses can
-        filter on them efficiently (e.g. s.locale='en').
+        Upserts on id. Metadata keys are also copied to node properties for
+        filtering. `created_at` is set only on creation.
         """
         g = await self._graph(team, graph_name)
         metadata = item.get("metadata", {})
@@ -740,6 +1091,7 @@ class FalkorStore(CodeGraphStore):
             "content": item["content"],
             "embedding": item["embedding"],
             "metadata_json": _json.dumps(metadata),
+            "created_at": created_at,
         }
         # Promote each metadata key to a direct node property for Cypher filtering.
         meta_sets: list[str] = []
@@ -751,8 +1103,9 @@ class FalkorStore(CodeGraphStore):
             meta_sets.append(f"s.{safe_key}=$meta_{safe_key}")
 
         set_clause = (
+            "ON CREATE SET s.created_at = coalesce($created_at, timestamp()) "
             "SET s.content=$content, s.embedding=vecf32($embedding), "
-            "    s.metadata=$metadata_json, s.created_at=timestamp()"
+            "    s.metadata=$metadata_json"
         )
         if meta_sets:
             set_clause += ", " + ", ".join(meta_sets)
@@ -770,14 +1123,8 @@ class FalkorStore(CodeGraphStore):
         filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         """KNN vector query over the team's SemanticItem index, optionally filtered
-        by metadata properties.
-
-        If `qvec` is None, performs a metadata-only match (no embedding search).
-
-        `score` is cosine **DISTANCE - lower = closer** (identical vector -> 0.0,
-        orthogonal -> 1.0), so the ranking is `ORDER BY score ASC`.
-        The returned `score` is therefore a distance (0 = best match), not a
-        similarity; callers should treat smaller as more relevant.
+        by metadata properties; metadata only when `qvec` is None. `score` is a
+        cosine distance, lower is closer.
         """
         g = await self._graph(team)
         filter_clauses: list[str] = []
@@ -848,6 +1195,55 @@ class FalkorStore(CodeGraphStore):
             })
         return rows
 
+    async def list_semantic(
+        self, team: str, *, filters: dict[str, Any] | None = None,
+        cursor: dict[str, Any] | None = None, limit: int = 50,
+    ) -> list[dict]:
+        """Full semantic-item browse, cursor-paginated on `(created_at, id)`.
+
+        Unlike get_by_metadata, lists every item when no filter is given.
+        """
+        g = await self._graph(team)
+        clauses: list[str] = []
+        params: dict[str, Any] = {"limit": limit}
+        for k, v in (filters or {}).items():
+            safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+            params[f"filter_{safe_key}"] = v
+            clauses.append(f"s.{safe_key}=$filter_{safe_key}")
+        if cursor is not None:
+            clauses.append(
+                "(s.created_at > $ccreated OR (s.created_at = $ccreated AND s.id > $cid))")
+            params["ccreated"] = cursor["created_at"]
+            params["cid"] = cursor["id"]
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        res = await g.query(
+            f"MATCH (s:SemanticItem) {where}"
+            "RETURN s.id, s.content, s.metadata, s.created_at "
+            "ORDER BY s.created_at ASC, s.id ASC LIMIT $limit",
+            params,
+        )
+        rows: list[dict] = []
+        for r in res.result_set:
+            meta_raw = r[2]
+            rows.append({
+                "id": r[0], "content": r[1],
+                "metadata": _json.loads(meta_raw) if meta_raw else {},
+                "created_at": r[3],
+            })
+        return rows
+
+    async def count_semantic(self, team: str, *, filters: dict[str, Any] | None = None) -> int:
+        g = await self._graph(team)
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
+        for k, v in (filters or {}).items():
+            safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", k)
+            params[f"filter_{safe_key}"] = v
+            clauses.append(f"s.{safe_key}=$filter_{safe_key}")
+        where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+        res = await g.query(f"MATCH (s:SemanticItem) {where}RETURN count(s)", params)
+        return int(res.result_set[0][0]) if res.result_set else 0
+
     async def proposal_get(self, proposal_id: str) -> dict[str, Any] | None:
         import json as _json
         v = await self._db.connection.get(f"kwim:proposal:{proposal_id}")
@@ -855,10 +1251,7 @@ class FalkorStore(CodeGraphStore):
             return None
         return _json.loads(v.decode() if isinstance(v, bytes) else v)
 
-    # --- Forget (hard-removal) ------------------
-    # DESTRUCTIVE. Unlike retract_object (soft: status flip), these remove data.
-    # Used by the forget path: the API Forget button (via gate.forget_object) and
-    # the standalone `python -m kwim_api.forget` operator CLI. Never a raw endpoint.
+    # --- Forget (hard delete), used by kwim_api.forget -----------------
 
     async def get_object_for_forget(
         self, team: str, object_id: str, object_type: str | None = None,
@@ -901,10 +1294,7 @@ class FalkorStore(CodeGraphStore):
         statement_contains: str | None = None,
     ) -> list[str]:
         """Batch selector: object ids matching the given filters. Metadata alone
-        (fact_type/source_kind/status) often can't separate garbage from legit -
-        e.g. code_hub facts share every field and differ only in statement text - so
-        `statement_contains` targets by content (the only safe way to forget the
-        mcp-snapshot hubs without taking the real ones)."""
+        (fact_type/source_kind/status) or statement text (`statement_contains`)."""
         label = "Fact" if object_type == "fact" else "Rule"
         text_field = "statement" if object_type == "fact" else "approach"
         g = await self._graph(team)
@@ -934,9 +1324,7 @@ class FalkorStore(CodeGraphStore):
         self, team: str, item_id: str,
     ) -> dict[str, Any] | None:
         """Resolve a :SemanticItem for the forget path: its id and content. None if
-        not found. The semantic counterpart of `get_object_for_forget` - with no
-        evidence to collect, because semantic items are written directly by
-        `materialize_semantic` and are never SUPPORTED_BY anything."""
+        not found."""
         g = await self._graph(team)
         res = await g.query(
             "MATCH (n:SemanticItem {id:$id}) RETURN n.id, n.content", {"id": item_id})
@@ -948,10 +1336,7 @@ class FalkorStore(CodeGraphStore):
     async def forget_semantic_node(self, team: str, item_id: str) -> bool:
         """DETACH DELETE the :SemanticItem node (removes node and embedding).
 
-        Returns True if the node is gone afterwards. Unlike `forget_node` there is
-        no orphaned-:Evidence sweep: a semantic item carries no SUPPORTED_BY edges,
-        and unlike facts/rules it has no commit_log row either - the node is the
-        whole object, so this alone is a complete removal."""
+        Returns True if the node is gone afterwards."""
         g = await self._graph(team)
         await g.query("MATCH (n:SemanticItem {id:$id}) DETACH DELETE n", {"id": item_id})
         check = await g.query(

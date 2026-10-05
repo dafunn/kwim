@@ -1,9 +1,7 @@
 """Code distiller refresh behaviour.
 
-Replaces the old object_id/idempotency tests: the distiller now reads the current
-fact, compares its statement, and only proposes when the content changes (with
-supersedes). It also selects load-bearing functions via PageRank + cross-community
-bridging rather than raw fan-in.
+The distiller proposes only when a statement changes (superseding the current
+fact), and picks load-bearing functions by PageRank and community bridging.
 """
 import uuid
 
@@ -21,8 +19,7 @@ class _FakeBus:
 class _FakeFalkor:
     """Fake store that persists facts so read-diff-supersede can be tested.
 
-    `query_facts` mirrors the real store's case-insensitive ANY match on `about`,
-    then distill.py filters client-side to the exact identity ref.
+    `query_facts` matches `about` as the real store does.
     """
 
     def __init__(self, hubs=None, ifaces=None, facts=None):
@@ -77,7 +74,7 @@ class _FakeFalkor:
 
 
 # ---------------------------------------------------------------------------
-# Freeze-fix: read-diff-supersede with no object_id
+# Read-diff-supersede with no object_id
 # ---------------------------------------------------------------------------
 
 async def test_unchanged_run_proposes_nothing():
@@ -151,7 +148,7 @@ async def test_interface_identity_disambiguated_by_path():
 
 
 # ---------------------------------------------------------------------------
-# Metric upgrade: PageRank + bridging + alphabetical set statement
+# Hub metric: PageRank + bridging + alphabetical set statement
 # ---------------------------------------------------------------------------
 
 async def test_metric_noise_floor_drops_low_fan_in():

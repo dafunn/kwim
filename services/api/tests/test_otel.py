@@ -6,11 +6,7 @@
      the app such that an inbound `traceparent` header produces a server span
      under that trace id (the agent->KWIM join).
 
-Both phases run in one test, in order, on purpose: trace.set_tracer_provider()
-refuses to override a real provider once set, so the no-op case must be observed
-before the endpoint case installs a real provider. conftest pops the OTEL env at
-session start (and kwim_api.main's import-time configure() is a no-op without an
-endpoint), so no real provider exists until part 2 installs it here.
+One test runs both, in order: a tracer provider cannot be replaced once set.
 """
 import logging
 
@@ -37,11 +33,8 @@ def test_configure_noop_then_traceparent_join(monkeypatch):
     assert len(app.user_middleware) == middleware_count_before     # no instrumentation added
 
     # --- Part 2: endpoint set -> inbound traceparent joins the trace ---
-    # configure() also installs a real OTLP BatchSpanProcessor pointed at the
-    # (unreachable) endpoint. Its background export retries are harmless daemon-
-    # thread noise, so silence that exporter's logger; assertions use a separate
-    # in-memory exporter. (We deliberately don't shut the provider down - its
-    # flush would block ~6s trying to reach the dead endpoint.)
+    # The real exporter points at an unreachable endpoint: its logger is silenced
+    # and the provider is not shut down. Assertions use an in-memory exporter.
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     monkeypatch.setenv("OTEL_SERVICE_NAME", "kwim-service-test")
     logging.getLogger("opentelemetry.exporter.otlp.proto.grpc.exporter").setLevel(logging.CRITICAL)

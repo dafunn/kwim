@@ -1,14 +1,7 @@
-"""Code distiller - derive governed Knowledge from the code graph.
+"""Code distiller: proposes a per-repo architecture summary and cross-repo
+interfaces from kwim_<team>_code through the gate (source_kind "repo_sync").
+See docs/DESIGN.md, "The code graph".
 
-Derives a small, high-signal set from kwim_<team>_code - one per-repo architecture
-summary (its load-bearing functions) plus cross-repo interfaces - and proposes them
-through the existing governance gate (publishes `knowledge.proposed` on the bus, like
-POST /v1/knowledge/propose, with source_kind="repo_sync"). The gate screens + commits
-them, so they become governed :Fact nodes that survive rebuild and that warm-start
-retrieves by `about`. Per-function structural facts are not distilled - that detail
-(exact callers, impact) is answered on-demand by the /v1/code/trace read instead.
-
-Run after extraction:
   python -m kwim_api.codegraph.distill --team T --repo R [--min-fan-in N]
 """
 from __future__ import annotations
@@ -33,12 +26,8 @@ async def _sync_fact(
 ) -> bool:
     """Read the current fact for this identity and propose only if it changed.
 
-    Uses `query_facts(..., about=[identity_ref])` then filters client-side to the
-    exact identity (the store's about match is ANY/OR and case-insensitive). An
-    unchanged statement means no proposal is published, while a changed statement
-    publishes a `supersedes=<current id>` proposal with no `object_id`.
-
-    Returns True iff a proposal was published.
+    A changed statement is proposed with `supersedes=<current id>`. Returns True
+    if a proposal was published.
     """
     existing = None
     candidates = await falkor.query_facts(

@@ -1,0 +1,60 @@
+# KWIM admin console: nginx serving the static app. The browser calls
+# kwim-service through the same ingress; this pod holds no credentials.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kwim-console
+  namespace: kwim
+  labels:
+    app: kwim-console
+    app.kubernetes.io/name: kwim-console
+    app.kubernetes.io/part-of: kwim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kwim-console
+  template:
+    metadata:
+      labels:
+        app: kwim-console
+        app.kubernetes.io/name: kwim-console
+        app.kubernetes.io/part-of: kwim
+    spec:
+      containers:
+        - name: kwim-console
+          # Bare image name; set your registry + tag via the kustomize `images:`
+          # transformer in your overlay.
+          image: kwim-console:latest
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kwim-console
+  namespace: kwim
+  labels:
+    app: kwim-console
+    app.kubernetes.io/name: kwim-console
+    app.kubernetes.io/part-of: kwim
+spec:
+  type: ClusterIP
+  selector:
+    app: kwim-console
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

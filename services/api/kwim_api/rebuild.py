@@ -1,14 +1,13 @@
-"""FalkorDB rebuild CLI - replay durable Postgres sources into a fresh graph.
-
-Run inside the kwim-service pod (it already has all credentials):
+"""Rebuild a team's FalkorDB graph from Postgres: replay commit_log, reapply
+fact_verifications, re-embed episodic text. Reads Postgres only. See
+docs/DESIGN.md, "The commit log is the source of truth".
 
     python -m kwim_api.rebuild --team <team> [--skip-semantic] [--in-place] [--yes]
     python -m kwim_api.rebuild --all-teams [--skip-semantic] [--yes]
     python -m kwim_api.rebuild --team universe [--yes]
 
-The rebuild is Postgres-read-only. It replays commit_log (facts + rules) and
-re-embeds episodic events with text (semantic memory). Working memory and
-proposal-status TTL keys are not rebuilt - they are ephemeral by design.
+--skip-semantic skips every embedding, including logged semantic items, which a
+later rebuild without it restores.
 """
 import argparse
 import asyncio
@@ -17,11 +16,23 @@ import sys
 
 from .config import settings
 from .embedder import Embedder
+from .freshness import _to_dt
 from .stores.falkor import FalkorStore, _graph_name
 from .stores.postgres import PostgresStore
 
 # Batch size for embedder calls during re-embed (rebuild.embed_batch, env-overridable).
 _EMBED_BATCH = settings.embed_batch
+
+
+def _epoch_ms(ts) -> int | None:
+    """Convert a stored timestamp to FalkorDB's epoch milliseconds, or None if
+    it cannot be parsed (the node then gets the store's own timestamp)."""
+    if ts is None:
+        return None
+    if hasattr(ts, "timestamp"):
+        return int(ts.timestamp() * 1000)
+    dt = _to_dt(ts)
+    return int(dt.timestamp() * 1000) if dt is not None else None
 
 
 async def _replay_commit(
@@ -31,13 +42,9 @@ async def _replay_commit(
     graph_name: str | None,
     embedder: "Embedder | None" = None,
 ) -> None:
-    """Replay <team>.commit_log into the target graph.
-
-    When `embedder` is provided (i.e. --skip-semantic not set), each committed
-    fact is re-embedded and its :Fact node gains an `embedding` property (
-    embeddings are not stored in the log - a model swap means rebuild re-embeds
-    with the new model consistently).
-    """
+    """Replay <team>.commit_log into the target graph in seq order, restoring each
+    node's created_at from committed_at. With `embedder`, facts and logged semantic
+    items are embedded."""
     rows = await pg.replay_commit_log(team)
     for row in rows:
         obj_type = row["object_type"]
@@ -46,6 +53,7 @@ async def _replay_commit(
         provenance = row["provenance"]
         seq = row["seq"]
         obj_id = row["object_id"]
+        created_at = _epoch_ms(row.get("committed_at"))
 
         # payload / provenance may arrive as parsed dicts (psycopg JSONB) or strings.
         if isinstance(payload, str):
@@ -62,10 +70,61 @@ async def _replay_commit(
                     embedding = vecs[0]
                 except Exception as exc:
                     print(f"  WARNING: failed to embed fact {obj_id}: {exc}", file=sys.stderr)
-            await falkor.materialize_fact(team, fact, provenance, graph_name, embedding=embedding)
+            await falkor.materialize_fact(team, fact, provenance, graph_name,
+                                          embedding=embedding, created_at=created_at)
         elif obj_type == "rule" and op == "commit":
             rule = {**payload, "id": obj_id, "commit_seq": seq, "status": "approved"}
-            await falkor.materialize_rule(team, rule, provenance, graph_name)
+            await falkor.materialize_rule(team, rule, provenance, graph_name,
+                                          created_at=created_at)
+        elif obj_type == "semantic" and op == "commit":
+            # A directly written semantic item; needs the embedder.
+            if embedder is None:
+                print(f"  WARNING: no embedder - skipping semantic {obj_id} "
+                      f"(seq={seq}); re-run without --skip-semantic", file=sys.stderr)
+            else:
+                try:
+                    vecs = await embedder.embed([payload["content"]])
+                except Exception as exc:
+                    print(f"  WARNING: failed to embed semantic {obj_id}: {exc}",
+                          file=sys.stderr)
+                else:
+                    await falkor.materialize_semantic(
+                        team,
+                        {"id": obj_id, "content": payload["content"],
+                         "embedding": vecs[0], "metadata": payload.get("metadata", {})},
+                        graph_name, created_at=created_at,
+                    )
+        elif op == "amend":
+            # Overwrite content; previous_payload is not replayed.
+            prev = (provenance.get("previous_payload") or {})
+            if obj_type == "fact":
+                emb = None
+                if embedder and payload.get("statement"):
+                    try:
+                        emb = (await embedder.embed([payload["statement"]]))[0]
+                    except Exception as exc:
+                        print(f"  WARNING: failed to embed amended fact {obj_id}: {exc}",
+                              file=sys.stderr)
+                await falkor.amend_fact(team, obj_id, payload, seq, graph_name,
+                                        embedding=emb)
+            elif obj_type == "rule":
+                await falkor.amend_rule(team, obj_id, payload, seq,
+                                        previous_situation=prev.get("situation"),
+                                        graph_name=graph_name)
+            elif obj_type == "semantic":
+                emb = None
+                if embedder and payload.get("content"):
+                    try:
+                        emb = (await embedder.embed([payload["content"]]))[0]
+                    except Exception as exc:
+                        print(f"  WARNING: failed to embed amended semantic {obj_id}: "
+                              f"{exc}", file=sys.stderr)
+                await falkor.amend_semantic(team, obj_id, payload,
+                                            previous_metadata=prev.get("metadata"),
+                                            graph_name=graph_name, embedding=emb)
+            else:
+                print(f"  WARNING: amend of unknown object_type {obj_type} seq={seq}",
+                      file=sys.stderr)
         elif obj_type == "rule" and op == "reinforce":
             evidence = payload.get("evidence", [])
             await falkor.reinforce_rule(team, obj_id, evidence, seq, graph_name)
@@ -87,6 +146,22 @@ async def _replay_commit(
             )
 
 
+async def _apply_verifications(
+    pg: PostgresStore, falkor: FalkorStore, team: str, graph_name: str | None,
+) -> int:
+    """Reapply last_verified_at from <team>.fact_verifications onto the replayed
+    current facts. Returns the number stamped."""
+    rows = await pg.read_verifications(team)
+    applied = 0
+    for r in rows:
+        if await falkor.reaffirm_fact(
+            team, r["fact_id"], verified_at=_epoch_ms(r["last_verified_at"]),
+            graph_name=graph_name,
+        ):
+            applied += 1
+    return applied
+
+
 async def _rebuild_semantic(
     pg: PostgresStore,
     falkor: FalkorStore,
@@ -94,11 +169,7 @@ async def _rebuild_semantic(
     team: str,
     graph_name: str | None,
 ) -> None:
-    """Re-embed episodic events with text into the target graph (batched).
-
-    TODO: items written via POST /v1/memory/semantic are not covered - they have
-    no Postgres record to replay. See `main.memory_semantic_write`.
-    """
+    """Re-embed episodic events with text into the target graph (batched)."""
     events = await pg.episodic_with_text(team)
     for i in range(0, len(events), _EMBED_BATCH):
         batch = events[i : i + _EMBED_BATCH]
@@ -133,6 +204,7 @@ async def _rebuild_semantic(
                     "metadata": metadata,
                 },
                 graph_name,
+                created_at=_epoch_ms(ev["occurred_at"]),
             )
 
 
@@ -168,9 +240,7 @@ async def _swap_graphs(falkor: FalkorStore, team: str) -> bool:
         await conn.execute_command("GRAPH.DELETE", temp)
         return True
     except Exception as exc:
-        # If live was already deleted but COPY failed, the temp graph would
-        # linger. Clean it up before falling back so the next rebuild starts
-        # from a clean temp graph.
+        # Remove the temp graph before falling back.
         try:
             await conn.execute_command("GRAPH.DELETE", temp)
         except Exception:
@@ -226,6 +296,14 @@ async def rebuild_team(
         print(f"  FAILED during commit replay: {exc}", file=sys.stderr)
         return False
 
+    print("  Reapplying fact verifications...")
+    try:
+        n = await _apply_verifications(pg, falkor, team, graph_name)
+        print(f"    {n} fact(s) restamped")
+    except Exception as exc:
+        print(f"  FAILED during verification reapply: {exc}", file=sys.stderr)
+        return False
+
     # Semantic re-embed (episodic events with text).
     if embedder:
         print("  Re-embedding episodic events...")
@@ -251,6 +329,7 @@ async def rebuild_team(
             await _clear_live_graph(falkor, team)
             try:
                 await _replay_commit(pg, falkor, team, None, embedder)
+                await _apply_verifications(pg, falkor, team, None)
             except Exception as exc:
                 print(f"  FAILED during fallback replay: {exc}", file=sys.stderr)
                 return False
@@ -271,7 +350,11 @@ async def main() -> int:
     )
     parser.add_argument("--team", help="Team to rebuild (or 'universe')")
     parser.add_argument("--all-teams", action="store_true", help="Rebuild every team with a commit_log")
-    parser.add_argument("--skip-semantic", action="store_true", help="Skip episodic re-embed")
+    parser.add_argument(
+        "--skip-semantic", action="store_true",
+        help="Skip all embedding: the episodic re-embed, fact vectors, and logged "
+             "semantic items. Skipped items stay in commit_log, so a later rebuild "
+             "without this flag restores them; each one is named on stderr.")
     parser.add_argument(
         "--in-place",
         action="store_true",

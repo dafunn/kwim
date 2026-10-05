@@ -5,7 +5,7 @@
 
 Auth keys/promote allowlist come from conftest's env superset:
   devkey -> acme (key_id "devkey", not a promote key)
-  promoter -> acme (key_id "promot", IS a promote key)
+  promoter -> acme (key_id "promot", is a promote key)
 """
 from typing import Any
 
@@ -77,12 +77,16 @@ class _Wired:
 @pytest.fixture
 def wired(client, monkeypatch):
     """Fresh fakes wired onto kwim_api.runtime.State for the duration of one test."""
+    from kwim_api.gate import Gate
     from kwim_api.runtime import State
 
     falkor, embedder, pg = _FakeFalkor(), _FakeEmbedder(), _FakePg()
     monkeypatch.setattr(State, "falkor", falkor, raising=False)
     monkeypatch.setattr(State, "embedder", embedder, raising=False)
     monkeypatch.setattr(State, "pg", pg, raising=False)
+    # A real Gate over the fakes, for POST /v1/memory/semantic.
+    monkeypatch.setattr(client.app.state, "gate", Gate(pg, falkor, None, embedder),
+                        raising=False)
     return _Wired(client, falkor, embedder, pg)
 
 
@@ -152,6 +156,34 @@ def test_post_semantic(wired):
     r = wired.client.post("/v1/memory/semantic", json={"id": "my-id", "content": "explicit id"}, headers=DEV)
     assert r.status_code == 201
     assert r.json()["id"] == "my-id"
+
+
+def test_post_semantic_is_durable(wired):
+    """A direct semantic write must land in commit_log, or a rebuild drops it.
+
+    """
+    r = wired.client.post(
+        "/v1/memory/semantic",
+        json={"id": "s-durable", "content": "keep me", "metadata": {"k": "v"}},
+        headers=DEV,
+    )
+    assert r.status_code == 201
+
+    commits = [c for c in wired.pg.calls if c[0] == "append_commit"]
+    assert len(commits) == 1
+    row = commits[0][2]
+    assert row["object_type"] == "semantic"
+    assert row["object_id"] == "s-durable"
+    assert row["operation"] == "commit"
+    assert row["payload"] == {"content": "keep me", "metadata": {"k": "v"}}
+
+
+def test_post_semantic_logs_before_materializing(wired):
+    """Ordering matters: a node with no row is silently reverted by a rebuild."""
+    wired.client.post("/v1/memory/semantic",
+                      json={"id": "s-order", "content": "x"}, headers=DEV)
+    assert wired.pg.calls[0][0] == "append_commit"
+    assert wired.falkor.calls[0][0] == "materialize_semantic"
 
 
 # ---------------------------------------------------------------------------

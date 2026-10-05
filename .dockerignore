@@ -1,0 +1,9 @@
+# Repo-root context for builds that need a file outside their own service dir
+# (services/api/Dockerfile needs db/team-schema.sql.j2; services/distiller/Dockerfile
+# needs clients/python/). Without this, a root-context build uploads the whole tree.
+.git/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+docs/

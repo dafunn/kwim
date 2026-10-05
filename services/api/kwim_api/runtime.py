@@ -1,13 +1,8 @@
-"""Process-wide store handles, bound once by the app lifespan.
-
-Separate from `main` so a router can reach the stores without importing the module
-that imports it.
-
-`State` is a namespace of class attributes, not an instance: the lifespan assigns
-them at startup and every router reads the same class object, so a test can swap a
-single attribute for a fake without rebuilding the app.
+"""Process-wide store handles, set by the app lifespan. `State` holds them as class
+attributes, so tests can replace one with a fake.
 """
 from .embedder import Embedder
+from .stores.admin import AdminStore
 from .stores.bus import Bus
 from .stores.falkor import FalkorStore
 from .stores.postgres import PostgresStore
@@ -18,3 +13,4 @@ class State:
     falkor: FalkorStore
     bus: Bus
     embedder: Embedder
+    admin: AdminStore

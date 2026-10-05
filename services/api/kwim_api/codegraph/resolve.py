@@ -2,10 +2,7 @@
 
 Ported from DeusData/codebase-memory-mcp registry.c (MIT). A Registry indexes all
 definitions by qualified name + simple name; resolve() maps a raw call-site callee
-to a target QN via a cascade, tagging each result with a confidence + strategy so
-downstream ranking and the W-layer can filter low-trust edges.
-
-Confidence constants are tuned for the resolution cascade below.
+to a target QN via a cascade, tagging each result with a confidence and strategy.
 """
 from __future__ import annotations
 
@@ -14,8 +11,7 @@ from dataclasses import dataclass
 from ..config import settings
 from .parse import ParsedFile
 
-# The confidence cascade is configuration (codegraph.resolution.* in kwim.defaults.yaml,
-# env-overridable). These module names are kept as the call-site/test contract.
+# Confidences come from codegraph.resolution.* in kwim.defaults.yaml.
 CONF_IMPORT_MAP = settings.cg_conf_import_map
 CONF_IMPORT_MAP_SUFFIX = settings.cg_conf_import_map_suffix
 CONF_SAME_CLASS = settings.cg_conf_same_class      # self.m / cls.m within the caller's own class
@@ -88,8 +84,7 @@ def resolve_call(reg: Registry, callee: str, module_qn: str, imap: dict[str, str
     if "." not in callee:
         prefix, suffix = callee, ""
 
-    # Strategy 0: same-class. `self.m` / `cls.m` from inside module.Class.method
-    # resolves to module.Class.m when that exists - beats the ambiguous suffix tier.
+    # Strategy 0: same class. `self.m` / `cls.m` -> module.Class.m.
     if prefix in ("self", "cls") and suffix and caller_qn and "." in caller_qn:
         enclosing_class = caller_qn.rsplit(".", 1)[0]
         cand = f"{enclosing_class}.{suffix.rsplit('.', 1)[-1]}"
@@ -108,8 +103,7 @@ def resolve_call(reg: Registry, callee: str, module_qn: str, imap: dict[str, str
                 if qn.startswith(resolved + ".") and qn.endswith("." + suffix):
                     return Resolution(qn, "import_map_suffix", CONF_IMPORT_MAP_SUFFIX)
 
-    # Strategy 2: same module. module_qn.callee (handles bare calls + self.method
-    # when the method is defined in a class in this module is covered by name lookup).
+    # Strategy 2: same module. module_qn.callee.
     cand = f"{module_qn}.{callee}"
     if reg.has(cand):
         return Resolution(cand, "same_module", CONF_SAME_MODULE)

@@ -1,9 +1,7 @@
 """Unit tests for the distiller job.
 
-These exercise app.run() end-to-end against fakes for the KWIM client surface
-(read_episodic / knowledge_propose / wisdom_propose / _post) and the LLM
-(make_llm) - no real KWIM service or LLM involved. The `distiller_app` fixture
-is provided by conftest.py.
+run() end to end against fakes for the KWIM client and the LLM (the
+`distiller_app` fixture, from conftest.py).
 """
 import json
 from unittest.mock import AsyncMock
@@ -177,8 +175,7 @@ class TestSelfEventExclusion:
         assert len(fake_llm.calls) == 1
         human_content = fake_llm.calls[0][-1].content
         assert "distiller_watermark" not in human_content   # watermark event excluded
-        # Events are presented by `ref` index now (not raw id); the real events
-        # content is present, the watermark's is not.
+        # The events' content is in the prompt; the watermark's is not.
         assert "trend A recurs" in human_content
         assert '"ref": 1' in human_content and '"ref": 2' in human_content
 
@@ -206,8 +203,7 @@ class TestMalformedDistillResponse:
 
     @pytest.mark.asyncio
     async def test_markdown_fenced_json_is_parsed(self, distiller_app, monkeypatch):
-        # Smaller models often wrap JSON in a ```json fence; the extractor must
-        # strip it so the candidate is proposed (not lost to a char-0 parse error).
+        # A ```json fence around the reply is stripped.
         monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(_EVENTS, _NEXT_CURSOR))
         fenced = '```json\n[{"kind": "fact", "statement": "Trend A recurs", ' \
                  '"fact_type": "observation", "evidence": [1, 2]}]\n```'

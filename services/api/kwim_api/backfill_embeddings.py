@@ -1,22 +1,6 @@
-"""Backfill missing :Fact embeddings - repair the semantic-search blind spot.
+"""Add an embedding to every current fact that has none, so semantic search can
+find it. Changes nothing else; safe to re-run.
 
-Every committed fact is supposed to carry a vector so `knowledge/search` and the
-semantic half of `memory/context` can find it. Two ways a fact ends up without one:
-
-  - the gate's embedding screen fails open when the embedder is unavailable
-    (`gate._screen_fact` returns (None, None)), so the fact commits correctly but
-    with no vector;
-  - it committed before the :Fact vector index existed.
-
-Either way the fact is live, governed and returned by `knowledge/query` - but it
-cannot match a semantic search, which reads as "we know nothing about that". A
-full `kwim_api.rebuild` re-embeds as a side effect; this is the targeted, non-destructive
-alternative: it only ever adds the `embedding` property to facts that lack one, and
-touches no statement, status, edge or commit_log row.
-
-Safe to re-run - already-embedded facts are not selected.
-
-Run (operator, privileged creds via the usual KWIM_* env / with-secrets.sh):
     python -m kwim_api.backfill_embeddings --team <team> [--commit]
     python -m kwim_api.backfill_embeddings --all-teams [--commit]
 """
@@ -41,11 +25,8 @@ _EMBED_BATCH = settings.embed_batch
 async def plan_backfill(
     falkor: FalkorStore, team: str, limit: int,
 ) -> tuple[list[dict], list[dict]]:
-    """Split the un-embedded current facts into (embeddable, skipped).
-
-    A fact with a blank statement has nothing to embed; it is reported rather than
-    silently counted as done, because it will keep reappearing on every run.
-    """
+    """Split the un-embedded current facts into (embeddable, skipped); a blank
+    statement is skipped and reported."""
     rows = await falkor.facts_missing_embedding(team, limit=limit)
     embeddable = [r for r in rows if r["statement"].strip()]
     skipped = [r for r in rows if not r["statement"].strip()]
@@ -55,11 +36,8 @@ async def plan_backfill(
 async def execute_backfill(
     falkor: FalkorStore, embedder: Embedder, team: str, plan: list[dict],
 ) -> dict:
-    """Embed each statement and attach the vector in place, batched.
-
-    A failed batch is logged and skipped rather than aborting the run - the next
-    invocation picks those facts up again, since they still have no embedding.
-    """
+    """Embed each statement and attach the vector in place, batched. A failed
+    batch is logged and left for the next run."""
     embedded, failed = 0, []
     for i in range(0, len(plan), _EMBED_BATCH):
         batch = plan[i : i + _EMBED_BATCH]
@@ -122,8 +100,7 @@ async def _amain(args: argparse.Namespace) -> int:
     embedder = Embedder() if args.commit else None
     try:
         if args.all_teams:
-            # Postgres is only needed to enumerate teams; the backfill itself is
-            # graph-only, so a single --team run never touches it.
+            # Postgres only lists the teams; the backfill itself is graph-only.
             from .stores.postgres import PostgresStore
             pg = PostgresStore()
             await pg.connect()

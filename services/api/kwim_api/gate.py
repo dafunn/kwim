@@ -1,29 +1,8 @@
-"""The governance gate
+"""The governance gate: consumes proposals from the bus and commits, rejects, or
+routes each one to human review. A commit appends <team>.commit_log, then writes
+the node and its edges to the team's graph.
 
-Consumes proposals off the bus (kwim.<team>.{knowledge,wisdom}.proposed), decides
-commit vs. human-review by evidence/conflict, and on commit makes the write durable
-and visible:
-  1. append <team>.commit_log  (Postgres - the durable, replayable record)
-  2. materialize the node + provenance edges in the team's FalkorDB graph
-(1) before (2) is deliberate: the commit log is the source of truth; the graph is a
-projection rebuilt from it, so the log must win if (2) ever fails.
-
-Decision policy (v1):
-  - fact:        evidence integrity + embedding screen -> dup reject / near review /
-                 commit. Auto-commit after clear screen.
-  - advisory:    evidence integrity + NELL-style distinct-session count;
-                 auto-commit at session_count >= threshold, else review.
-  - constraint:  always human review - enforcement policy is too consequential to
-                 auto-commit. Never auto-applied.
-
-Human review: proposals routed to "review" are persisted to
-<team>.pending_proposals (durable - see db/team-schema.sql.j2) before the
-proposal status KV is updated, so an approval/rejection always has a body to act
-on. A best-effort Mattermost notification follows.
-
-Gate verify: embedder-down -> screen skipped, commit with
-provenance.verify="skipped:embedder_unavailable" (fail-open). Kill switch:
-KWIM_GATE_VERIFY=0 bypasses all verify checks.
+See docs/DESIGN.md, "The governance gate" and "The commit log is the source of truth".
 """
 import json
 import logging
@@ -49,11 +28,7 @@ _SUMMARY_MAX = settings.gate_summary_max
 
 def _split_well_formed_uuids(ids: list[str]) -> tuple[list[str], list[str]]:
     """Partition evidence ids into (well-formed canonical UUID strings, malformed).
-
-    Only well-formed ids may reach evidence_meta's `::uuid[]` cast - a malformed id
-    (e.g. a model that hallucinated or truncated an evidence id) would otherwise throw
-    InvalidTextRepresentation and crash the gate consumer, stalling all governance.
-    Malformed ids are returned separately so callers can treat them as unknown."""
+    Only the well-formed ones may reach SQL; see docs/DESIGN.md, "The governance gate"."""
     well_formed: list[str] = []
     malformed: list[str] = []
     for eid in ids:
@@ -115,14 +90,8 @@ class Gate:
         if ptype == "rule" and body.get("reinforces"):
             return await self._reinforce(team, pid, proposal, body)
 
-        # --- idempotent re-distill short-circuit ---
-        # A proposer-supplied stable object_id whose node already exists is a no-op:
-        # that fact was committed and posted for review when first seen, so re-runs
-        # don't re-commit, re-notify, or re-queue it. It also respects a human
-        # retraction - a retracted node still "exists", so we won't resurrect it.
-        #
-        # Dormant: the code distiller supersedes-on-change. Kept for internal
-        # raw-bus proposers.
+        # A stable object_id whose node already exists (even retracted) is a no-op.
+        # No proposer sets it today; see docs/DESIGN.md, "The governance gate".
         stable_id = body.get("object_id")
         if ptype == "fact" and stable_id and await self._falkor.find_object(team, stable_id, "fact"):
             doc = {"id": pid, "object_type": "fact", "status": "noop",
@@ -170,11 +139,7 @@ class Gate:
 
     async def _embed_statement(self, statement: str | None) -> list[float] | None:
         """Embed a fact statement for storage, or None if that is not possible.
-
-        Fail-open, like the screen: a fact that cannot be embedded still commits.
-        The cost of failing is a fact invisible to semantic search, which
-        `kwim_api.backfill_embeddings` repairs, so it is logged loudly enough to notice.
-        """
+        Fails open: the fact still commits without a vector."""
         if self._embedder is None or not statement or not statement.strip():
             return None
         try:
@@ -203,14 +168,7 @@ class Gate:
             log.warning("gate: embedder unavailable for fact screen, skipping: %s", exc)
             return None, None
 
-        # A stable-id fact uses its object_id as the dedup key rather than embedding
-        # similarity, so it skips the near-match screen and commits directly (still
-        # storing the vector for retrieval). Without this, structurally-distinct hubs
-        # with similar phrasing ("X is a call hub" / "Y is a call hub") read as
-        # near-matches, perpetually route to review, never commit, and re-queue every
-        # run. handle()'s idempotent short-circuit already drops re-proposals of ones
-        # that already committed; this lets the new ones through cleanly.
-        # Dormant along with that short-circuit.
+        # A stable-id fact is deduplicated by its id, not by similarity.
         if body.get("object_id"):
             return None, vec
 
@@ -219,11 +177,7 @@ class Gate:
             about=body.get("about") or None,
             fact_type=body.get("fact_type"),
         )
-        # Exclude the explicit supersession target - the live path, used by the code
-        # distiller, which proposes supersedes=<current id> when a statement changes -
-        # and, for a stable-id proposer, the fact's own prior node, so re-proposing the
-        # same structural fact updates it in place (MERGE-on-id in commit) instead of
-        # dup-rejecting or review-spamming against itself.
+        # The fact being superseded (and a stable-id fact's own node) is not a duplicate.
         excluded = {body.get("supersedes"), body.get("object_id")}
         neighbors = [n for n in neighbors if n["id"] not in excluded]
 
@@ -264,12 +218,7 @@ class Gate:
         if not deduped:
             return [], 0, None
 
-        # Only well-formed UUIDs may reach evidence_meta's `::uuid[]` cast - a
-        # malformed id (e.g. a model that hallucinated or truncated an evidence id,
-        # like "9f007edb") would throw InvalidTextRepresentation and crash the gate
-        # consumer, stalling all governance for every team. Canonicalize valid ids
-        # (so case/format variants match the DB's id::text) and treat malformed ids
-        # as unknown evidence -> problem -> review. Never send them to SQL.
+        # Malformed ids count as unknown evidence and never reach SQL.
         well_formed, malformed = _split_well_formed_uuids(deduped)
         rows = await self._pg.evidence_meta(team, well_formed) if well_formed else []
         found_ids = {r["id"] for r in rows}
@@ -286,22 +235,12 @@ class Gate:
         extra_provenance: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
     ) -> dict[str, Any]:
-        """Commit a proposal: append commit_log + materialize the FalkorDB node.
+        """Commit a proposal: append commit_log, then write the node.
 
-        Shared by auto-commit (handle()) and human-approved commit (review
-        surface) - identical in shape except gate_decision and reviewer
-        provenance. extra_provenance (approved_by/approved_via, verify) is
-        merged in without overriding the original proposer's attribution.
-        `embedding`: stored on the :Fact node when present. Callers that already
-        hold a vector (the auto-commit path, which screened with it) pass it in;
-        anyone else leaves it None and this method embeds the statement itself, so
-        no commit path can mint a fact that semantic search cannot see.
+        Used by auto-commit and by human approval. `extra_provenance` is merged in
+        without overriding the proposer's attribution. A fact without `embedding`
+        is embedded here.
         """
-        # A stable, body-supplied object_id lets an idempotent proposer re-commit the
-        # same structural fact onto one node via materialize_fact's MERGE-on-id,
-        # instead of minting a new uuid every run and accumulating duplicates. Agents
-        # can't reach this: FactProposal has no object_id field, so only internal
-        # raw-bus proposers can set it, and none does today (see handle()).
         object_id = body.get("object_id") or str(uuid.uuid4())
         payload, provenance = self._split(ptype, body, proposal)
         if ptype == "fact" and embedding is None:
@@ -331,26 +270,112 @@ class Gate:
                "object_id": object_id, "seq": seq}
         await self._falkor.proposal_set(pid, doc)
 
-        # Every auto-commit is posted for post-hoc review (Confirm/Retract) - nothing
-        # is committed silently, regardless of source_kind. (Human-approved commits
-        # arrive with gate_decision='human_approved', so they aren't re-notified; and
-        # unchanged re-distills never reach here - the idempotent short-circuit in
-        # handle() drops them before commit.)
+        # Every auto-commit is posted for review after the fact.
         if gate_decision == "auto_committed":
             await self._notify_auto_commit(team, object_id, ptype, body)
 
         return doc
 
+    async def amend_object(
+        self, team: str, object_id: str, object_type: str,
+        new_payload: dict[str, Any], amended_by: str, amended_via: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Overwrite a live object's content fields, logging the previous values
+        and the reason. See docs/DESIGN.md, "Changing committed objects".
+
+        Returns {"status": "amended"|"not_found"|"not_current"|"invalid_field", ...}.
+        """
+        allowed = FalkorStore.AMENDABLE.get(object_type)
+        if allowed is None:
+            return {"status": "invalid_field", "fields": [], "detail":
+                    f"amend does not apply to object_type {object_type!r}"}
+        bad = sorted(set(new_payload) - set(allowed))
+        if bad:
+            return {"status": "invalid_field", "fields": bad, "detail":
+                    f"not amendable: {', '.join(bad)}; amendable: {', '.join(allowed)}"}
+        if not new_payload:
+            return {"status": "invalid_field", "fields": [], "detail": "empty payload"}
+
+        reader = {"fact": self._falkor.get_fact_content,
+                  "rule": self._falkor.get_rule_content,
+                  "semantic": self._falkor.get_semantic_content}[object_type]
+        current = await reader(team, object_id)
+        if current is None:
+            return {"status": "not_found", "object_id": object_id}
+        live = {"fact": "current", "rule": "approved"}.get(object_type)
+        if live is not None and current.get("status") != live:
+            return {"status": "not_current", "object_id": object_id,
+                    "object_status": current.get("status")}
+
+        # Only the fields this amend replaces.
+        previous = {k: current.get(k) for k in new_payload}
+        seq = await self._pg.append_commit(team, {
+            "object_type": object_type, "object_id": object_id, "operation": "amend",
+            "payload": new_payload,
+            "provenance": {"amended_by": amended_by, "amended_via": amended_via,
+                           "previous_payload": previous,
+                           **({"reason": reason} if reason else {})},
+            "proposed_by": None, "source_kind": None,
+            "gate_decision": "human_approved",
+        })
+
+        embedding = None
+        if object_type == "fact" and "statement" in new_payload:
+            embedding = await self._embed_statement(new_payload["statement"])
+            ok = await self._falkor.amend_fact(team, object_id, new_payload, seq,
+                                               embedding=embedding)
+        elif object_type == "fact":
+            ok = await self._falkor.amend_fact(team, object_id, new_payload, seq)
+        elif object_type == "rule":
+            ok = await self._falkor.amend_rule(team, object_id, new_payload, seq,
+                                               previous_situation=current.get("situation"))
+        else:
+            if "content" in new_payload:
+                vecs = await self._embedder.embed([new_payload["content"]])
+                embedding = vecs[0]
+            ok = await self._falkor.amend_semantic(
+                team, object_id, new_payload,
+                previous_metadata=current.get("metadata"), embedding=embedding)
+
+        if not ok:
+            log.warning("gate: amend %s wrote commit_log seq=%s but the node did not "
+                        "update - a rebuild will apply it", object_id, seq)
+        log.info("gate: AMEND %s (%s) by %s via %s seq=%s",
+                 object_id, object_type, amended_by, amended_via, seq)
+        return {"status": "amended", "object_id": object_id, "seq": seq,
+                "previous_payload": previous}
+
+    async def commit_semantic(
+        self, team: str, item_id: str, content: str, metadata: dict[str, Any],
+        proposed_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit a directly written semantic item: commit_log row, then the node.
+        Unscreened, recorded as "auto_committed". See docs/DESIGN.md, "Semantic memory".
+        Returns {"object_id", "seq"}.
+        """
+        payload = {"content": content, "metadata": metadata or {}}
+        provenance = {"proposed_by": proposed_by} if proposed_by else {}
+        seq = await self._pg.append_commit(team, {
+            "object_type": "semantic", "object_id": item_id, "operation": "commit",
+            "payload": payload, "provenance": provenance,
+            "proposed_by": proposed_by,
+            "source_kind": "agent_proposal",
+            "gate_decision": "auto_committed",
+        })
+        vecs = await self._embedder.embed([content])
+        await self._falkor.materialize_semantic(team, {
+            "id": item_id, "content": content, "embedding": vecs[0],
+            "metadata": metadata or {},
+        })
+        return {"object_id": item_id, "seq": seq}
+
     async def _route_to_review(
         self, team: str, pid: str, ptype: str, body: dict[str, Any], proposal: dict[str, Any],
         detail: str = "queued for human review",
     ) -> dict[str, Any]:
-        """Persist the proposal durably before updating status/notifying.
-
-        If insert_pending fails, the message is nacked (requeue=False) by
-        _on_message's `message.process` context - the proposal is dropped, but
-        logged in full so it's recoverable from Loki.
-        """
+        """Write the proposal to pending_proposals, then set its status and notify.
+        If the write fails, the message is dropped and the proposal logged in full."""
         try:
             await self._pg.insert_pending(team, {
                 "proposal_id": pid, "object_type": ptype,
@@ -368,21 +393,14 @@ class Gate:
         return doc
 
     async def _notify_review(self, team: str, pid: str, ptype: str, body: dict[str, Any]) -> None:
-        """Best-effort mattermost notification for a newly-pending proposal.
-
-        Never raises - webhook failure is logged and otherwise ignored. The
-        review queue (GET /v1/review/pending) is the source of truth, not this
-        notification.
-        """
+        """Post a newly pending proposal to Mattermost. Never raises."""
         if not settings.mm_webhook_url:
             return
 
         summary = summarize_proposal(ptype, body)
         title = f"KWIM review: {ptype} proposal ({team})"
-        # Render the summary inside a markdown code span so regex/markdown special
-        # chars in it (e.g. a constraint's action_pattern `.*foo.*`) display literally
-        # in mattermost instead of being eaten as formatting. Escape backticks in the
-        # summary first so they can't break out of the code span.
+        # A code span shows regex and markdown characters literally; backticks
+        # inside are replaced so they cannot end the span.
         text = f"`{summary.replace('`', '\u2032')}`" if summary else "(no summary available)"
 
         attachment: dict[str, Any] = {
@@ -439,14 +457,8 @@ class Gate:
             log.warning("gate: Mattermost notify failed for proposal %s: %s", pid, exc)
 
     async def _notify_auto_commit(self, team: str, object_id: str, ptype: str, body: dict[str, Any]) -> None:
-        """Best-effort mattermost notification for a distiller auto-commit.
-
-        Distinct from `_notify_review`: this fires after commit (the object is
-        already live), labeled "auto-committed (review optional)", and its buttons
-        act on the committed `object_id` via `/v1/review/committed-action`
-        (Confirm/Retract) rather than on a pending proposal_id. Never raises -
-        webhook failure is logged and otherwise ignored.
-        """
+        """Post an auto-committed object to Mattermost with Confirm / Retract
+        buttons for /v1/review/committed-action. Never raises."""
         if not settings.mm_webhook_url:
             return
 
@@ -508,12 +520,7 @@ class Gate:
     async def retract_object(
         self, team: str, object_id: str, by: str, via: str, object_type: str | None = None,
     ) -> dict[str, Any]:
-        """Post-hoc retraction of an already-committed object.
-
-        Appends a `commit_log` entry (operation="retract", gate_decision=
-        "human_retracted") and flips the FalkorDB node's status to 'retracted' -
-        mirrors the existing supersede path. `query_facts`/`query_rules` filter on
-        the live status, so a retracted object stops being served immediately.
+        """Retract a committed object: a `retract` log row, then status 'retracted'.
         Returns {"status": "not_found" | "already_retracted" | "retracted", ...}.
         """
         found = await self._falkor.find_object(team, object_id, object_type)
@@ -535,13 +542,8 @@ class Gate:
     async def confirm_object(
         self, team: str, object_id: str, by: str, via: str, object_type: str | None = None,
     ) -> dict[str, Any]:
-        """Post-hoc human confirmation of an already-committed object.
-
-        Appends a `commit_log` entry (operation="confirm", gate_decision=
-        "human_confirmed") and stamps confirmed_by/confirmed_at on the FalkorDB
-        node - no status change. Replay-able like retract, so rebuild preserves
-        the confirmation.
-        Returns {"status": "not_found" | "confirmed", ...}.
+        """Confirm a committed object: a `confirm` log row, then confirmed_by /
+        confirmed_at on the node. Returns {"status": "not_found" | "confirmed", ...}.
         """
         found = await self._falkor.find_object(team, object_id, object_type)
         if found is None:
@@ -560,15 +562,8 @@ class Gate:
     async def forget_object(
         self, team: str, object_id: str, by: str, via: str, object_type: str | None = None,
     ) -> dict[str, Any]:
-        """Hard-forget an already-committed object - irreversibly remove it from every
-        store (FalkorDB node + embedding, commit_log rows, non-shared source episodics).
-
-        Unlike retract_object (soft: status flip, replayable), this leaves no tombstone,
-        so a rebuild cannot re-derive it. The shared-evidence guard preserves any episodic
-        that also supports a different live object. Delegates to the shared forget core,
-        which preflights Postgres DELETE and aborts before touching FalkorDB if the role
-        can't finish in Postgres (no half-forget). `by`/`via` are logged for the operator
-        audit only - by design the governed audit rows are deleted with the object.
+        """Forget a committed object (see docs/DESIGN.md, "Forget"). `by` and `via`
+        go to the service log only, since the object's log rows are deleted with it.
         Returns {"status": "not_found" | "preflight_failed" | "forgotten", ...}.
         """
         result = await forget.forget_one(
@@ -582,13 +577,9 @@ class Gate:
     async def forget_episodics(
         self, team: str, episodic_ids: list[str], by: str, via: str,
     ) -> dict[str, Any]:
-        """Hard-forget the source episodics behind a rejected/uncommitted proposal.
-
-        Nothing was committed (no graph node), so this only deletes the source episodic
-        events - after the shared-evidence guard, so any event still supporting a live
-        object is preserved. Delegates to the shared forget core (Postgres preflight
-        included). `by`/`via` are logged for the operator audit only.
-        Returns {"status": "no_delete" | "preflight_failed" | "forgotten", ...}.
+        """Forget the source events of an uncommitted proposal, keeping any that
+        support a live object. Returns {"status": "no_delete" | "preflight_failed" |
+        "forgotten", ...}.
         """
         result = await forget.forget_episodics(self._falkor, self._pg, team, episodic_ids)
         if result["status"] == "forgotten":
@@ -599,14 +590,8 @@ class Gate:
     async def _reinforce(
         self, team: str, pid: str, proposal: dict[str, Any], body: dict[str, Any]
     ) -> dict[str, Any]:
-        """Accrue evidence on an already-approved advisory rule (no new node created).
-
-        Auto-commits: adding evidence to a live rule is not a new claim, so it
-        skips the normal threshold/review path. Evidence is deduped and
-        validated against episodic_events; n becomes the deduped-valid count
-        (unknown ids are dropped, logged - not routed to review; the rule already
-        exists, and a later reinforce will pick up in-flight events once they land).
-        """
+        """Add evidence to an approved advisory rule and commit directly. Unknown
+        evidence ids are dropped and logged; the count is the valid ids only."""
         rule_id = body["reinforces"]
         raw_ev: list[str] = body.get("evidence", [])
 

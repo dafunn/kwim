@@ -1,8 +1,6 @@
 """RabbitMQ publisher - the async write path. Proposals and episodic events are
-published to the /kwim vhost; the governance gate consumes them off the bus.
-
-Tenancy: routing key carries the team segment - kwim.<team>.<kind>.proposed /
-kwim.<team>.episodic. Exchange is a single topic exchange on the /kwim vhost.
+published to one topic exchange on the /kwim vhost, with routing keys
+kwim.<team>.<kind>.proposed and kwim.<team>.episodic.
 """
 import json
 from typing import Any
@@ -21,8 +19,7 @@ class Bus:
         self._ex: aio_pika.abc.AbstractExchange | None = None
 
     async def connect(self) -> None:
-        # Discrete kwargs (no amqp:// URL) - virtualhost passed directly, so no
-        # %2F encoding of "/kwim", and password special chars can't corrupt parsing.
+        # Discrete arguments, not a URL; see docs/DESIGN.md, "Configuration".
         self._conn = await aio_pika.connect_robust(
             host=settings.rmq_host, port=settings.rmq_port, login=settings.rmq_user,
             password=settings.rmq_password, virtualhost=settings.rmq_vhost,

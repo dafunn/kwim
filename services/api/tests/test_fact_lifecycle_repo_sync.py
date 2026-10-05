@@ -20,9 +20,15 @@ from kwim_api.routers.knowledge import knowledge_reaffirm as _knowledge_reaffirm
 class _FakePg:
     def __init__(self):
         self.commit_appended: list[dict] = []
+        self.verifications: list[dict] = []
 
     async def evidence_meta(self, team, ids):
         return []
+
+    async def record_verification(self, team, fact_id, verified_at, verified_by=None):
+        self.verifications.append({"team": team, "fact_id": fact_id,
+                                   "verified_at": verified_at, "verified_by": verified_by})
+        return True
 
     async def append_commit(self, team, row):
         self.commit_appended.append(row)
@@ -93,17 +99,20 @@ class _FakeFalkor:
     async def proposal_get(self, pid):
         return None
 
-    async def reaffirm_fact(self, team, fact_id):
+    async def reaffirm_fact(self, team, fact_id, verified_at=None, graph_name=None):
         for f in self._facts:
             if f["id"] == fact_id and f["status"] == "current":
-                f["last_verified_at"] = str(int(datetime.now(UTC).timestamp() * 1000))
+                f["last_verified_at"] = str(
+                    verified_at if verified_at is not None
+                    else int(datetime.now(UTC).timestamp() * 1000))
                 return True
         return False
 
 
 class _FakeState:
-    def __init__(self, falkor):
+    def __init__(self, falkor, pg=None):
         self.falkor = falkor
+        self.pg = pg or _FakePg()
 
 
 def _make_gate(falkor):
@@ -111,8 +120,7 @@ def _make_gate(falkor):
 
 
 # ---------------------------------------------------------------------------
-# Freshness parse regression (already covered in test_freshness.py,
-# but _to_dt is the internal primitive that enables everything here)
+# Timestamp parsing (_to_dt)
 # ---------------------------------------------------------------------------
 
 def test_to_dt_handles_epoch_ms_and_iso():
@@ -177,10 +185,13 @@ def call_reaffirm(monkeypatch):
     """Return an async caller for the reaffirm endpoint with a fake store."""
     import kwim_api.routers.knowledge as main_mod
 
-    async def _call(falkor, fact_id):
-        monkeypatch.setattr(main_mod, "State", _FakeState(falkor))
+    async def _call(falkor, fact_id, pg=None):
+        state = _FakeState(falkor, pg)
+        monkeypatch.setattr(main_mod, "State", state)
         team = TeamContext(team="acme", key_id="devkey")
-        return await _knowledge_reaffirm_handler(fact_id, team=team)
+        result = await _knowledge_reaffirm_handler(fact_id, team=team)
+        _call.state = state
+        return result
 
     return _call
 
@@ -271,8 +282,7 @@ async def test_knowledge_query_passes_source_kind(call_knowledge_query):
          "decay_class": "slow", "source_kind": "repo_sync",
          "last_verified_at": None},
     ])
-    # The public query endpoint does not expose source_kind filtering yet,
-    # but the store returns it and the response model carries it.
+    # The query endpoint has no source_kind filter; the response carries it.
     rows = await call_knowledge_query(fk)
     assert rows[0].source_kind == "repo_sync"
     assert rows[0].last_verified_at is None
