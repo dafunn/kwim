@@ -14,9 +14,11 @@ clients/python/dist/
 clients/python/build/
 clients/python/*.egg-info/
 
-# SQL rendered from the jinja template in db/
+# SQL rendered from the jinja template in db/ should be ignored
 db/rendered/
 db/*.sql
+# but allow the admin schema, applied as-is (docs/deployment.md step 5).
+!db/admin-schema.sql
 
 # Editor and OS scratch
 *.swp

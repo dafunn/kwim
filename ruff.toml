@@ -1,0 +1,41 @@
+# The tree passes this rule set clean. Widen it deliberately.
+line-length = 110
+target-version = "py312"
+
+exclude = [
+    ".venv",
+    "clients/python/build",
+    "clients/python/dist",
+]
+
+[lint]
+select = [
+    "F",      # pyflakes: undefined names, unused imports, f-string bugs
+    "E9",     # syntax / IO errors
+    "I",      # import sorting
+    "UP",     # pyupgrade: outdated syntax for the target version
+    "B",      # bugbear: mutable defaults, loop-variable capture, silent except
+    "C4",     # comprehension simplifications
+    "RUF100", # unused noqa
+]
+
+ignore = [
+    # FastAPI's dependency-injection idiom is a call in a default argument
+    # (`team: TeamContext = CurrentTeam`, `repos: list[str] = Query(None)`).
+    "B008",
+    # Enrichment slots re-raise nothing: a degraded backend must not fail the
+    # request. Each site logs instead.
+    "B904",
+]
+
+[lint.per-file-ignores]
+# Tests stub module boundaries before importing the module under test, so their
+# imports do not all sit at the top of the file.
+"services/api/tests/*" = ["E402"]
+"services/distiller/tests/*" = ["E402"]
+# The logger binds before the heavy imports that use it.
+"services/api/kwim_api/main.py" = ["E402"]
+"services/api/kwim_api/stores/falkor.py" = ["E402"]
+
+[lint.isort]
+known-first-party = ["kwim_api", "distiller", "kwim", "llm_router", "secret_reader"]

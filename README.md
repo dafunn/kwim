@@ -133,8 +133,32 @@ to gate the high-bar operations, which is the shape tool authorization wants.
 | `services/api/` | The kwim-service - FastAPI app, the Postgres and FalkorDB stores, the gate, freshness/decay, graph rebuild, the admin API, and the code-graph extractor. Plus its tests. |
 | `services/distiller/` | The distiller - a scheduled job that reads a team's episodic events, extracts durable learnings from them, and proposes those back through the gate like any other client. |
 | `clients/` | The Python client agents use to reach the kwim-service, plus model routing and secret reading. |
-| `db/` | Per-team schema template and rendered SQL. |
+| `db/` | The per-team schema template and the admin schema. |
 | `k8s/` | Example Kubernetes manifests for running it. |
+
+## Running the tests
+
+The suites need Python 3.12 and nothing running: the stores, the bus, and the
+embedder are faked. From the repo root:
+
+```bash
+make venv     # services/api/.venv, from services/api/requirements-dev.txt
+make check    # ruff, then the API and distiller suites, then the client's tests
+```
+
+`make help` lists the narrower targets (`test-api`, `test-distiller`,
+`test-client`, `lint`). Without make:
+
+```bash
+python3 -m venv services/api/.venv
+services/api/.venv/bin/pip install -r services/api/requirements-dev.txt
+services/api/.venv/bin/python -m pytest       # both suites; settings in pytest.ini
+cd clients/python && ../../services/api/.venv/bin/python test_kwim.py \
+  && ../../services/api/.venv/bin/python test_llm_router.py
+```
+
+Run pytest from the repo root: `pytest.ini` there sets the import paths and the
+async test mode both suites depend on.
 
 ## Notes
 

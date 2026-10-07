@@ -17,12 +17,15 @@ discipline when you adapt this.
 | **FalkorDB** | K/W graph + per-team code graph + semantic vectors | yes (graph DB) |
 | **PostgreSQL** | source-of-truth commit log + episodic memory | yes |
 | **RabbitMQ** | internal governance bus (propose -> gate) | yes |
-| **LiteLLM** | Intelligence - model gateway (routing + accounting) | yes |
-| **kwim-service** | the K/W/M HTTP/JSON API + the gate + the code-graph extractor | this repo (`service/`) |
-| **embedder** | sentence embeddings for the semantic + dedup paths | this repo |
+| **Model gateway** | Intelligence - routes model calls (LiteLLM, or any OpenAI-compatible gateway) | yes - you supply it |
+| **kwim-service** | the K/W/M HTTP/JSON API + the gate + the code-graph extractor | this repo (`services/api/`) |
+| **embedder** | sentence embeddings for the semantic + dedup paths | this repo (`services/api/Dockerfile.embedder`) |
+| **kwim-console** | the admin console, a static app over `/v1/admin` | this repo (`services/console/`) |
+| **distiller** | per-team job that turns episodic events into proposals | this repo (`services/distiller/`) |
 
-The workload manifests are in `k8s/`. Apply them however you reconcile a cluster
-(a GitOps controller, or `kubectl apply -k k8s/`).
+The workload manifests are in `k8s/base/`. Reference it from your own kustomize
+overlay and apply that however you reconcile a cluster (a GitOps controller, or
+`kubectl apply -k <your-overlay>`).
 
 ## Prerequisites
 
@@ -33,13 +36,37 @@ The workload manifests are in `k8s/`. Apply them however you reconcile a cluster
   files mounted at `/secrets/*`, loaded into the process env by `services/api/with-secrets.sh`
   at startup (a secret manager that syncs into the pod works well, but anything that
   populates those files does). Nothing puts a secret value in a manifest.
-- For **Intelligence**: a model backend LiteLLM can route to - a local inference server
-  and/or cloud API keys.
+- A **model gateway**, run by you like PostgreSQL and RabbitMQ: LiteLLM, or any
+  OpenAI-compatible endpoint, in front of a local inference server and/or cloud
+  API keys. KWIM deploys no gateway, and kwim-service makes no model calls. The
+  distiller and agents do, through `clients/python/llm_router.py`, which reads:
+  - `LITELLM_BASE_URL` - the gateway's OpenAI-compatible base URL
+    (default `http://localhost:4000/v1`)
+  - the API key, from the secret file named by `LLM_API_KEY_SECRET` (default
+    `litellm-key`) in `/secrets` (or `KWIM_SECRETS_DIR`)
+  - the model: `DISTILLER_MODEL` for the distiller, `DEFAULT_LLM_MODEL` otherwise
+
+  Requests carry an `x-litellm-tags` header (`agent:<name>`, plus `LITELLM_TAGS`)
+  for LiteLLM's spend attribution; other gateways ignore it.
 
 ## Bring-up order
 
 The order matters: each step provisions substrate the next depends on.
 
+0. **Images.** No images are published; build them from this repo and push them to
+   your registry:
+
+   | Image | Build (from the repo root) |
+   |---|---|
+   | kwim-service (also the code-graph CronJob) | `docker build -f services/api/Dockerfile -t <registry>/kwim-service .` |
+   | kwim-embedder | `docker build -f services/api/Dockerfile.embedder -t <registry>/kwim-embedder services/api` |
+   | kwim-console | `docker build -f services/console/Dockerfile -t <registry>/kwim-console services/console` |
+   | distiller | `docker build -f services/distiller/Dockerfile -t <registry>/distiller .` |
+
+   kwim-service and the distiller build from the repo root, not their own
+   directories: they copy `db/` and `clients/python/`. Point your overlay's
+   `images:` at the pushed tags, and if the registry is private, give the
+   workloads a pull secret.
 1. **Secrets.** Make these available at `/secrets/` (names from `with-secrets.sh`):
    `db-password`, `rabbitmq-password`, `falkordb-password`, `api-keys`, `promote-keys`,
    and - if you use the review surface - `mm-webhook-url`, `mm-action-secret`. If you run
@@ -49,8 +76,15 @@ The order matters: each step provisions substrate the next depends on.
    preflight checks for it, and inline Forget deletes as this role.)
 3. **RabbitMQ** (once). A dedicated vhost + user for the governance bus.
 4. **Universe schema** (once per cluster). The shared cross-team `universe` schema
-   (promoted, globally-approved Wisdom). FalkorDB's `kwim_universe` graph auto-creates on
-   first write. (Schema shape: `db/`.)
+   (promoted, globally-approved Wisdom) is the team template rendered for the team
+   name `universe`, applied as the application role:
+
+   ```bash
+   sed 's/{{ kwim_team }}/universe/g' db/team-schema.sql.j2 | psql -U <app-role> -d <kwim-db>
+   ```
+
+   `POST /v1/admin/teams` refuses the name `universe`, so this step is always by
+   hand. FalkorDB's `kwim_universe` graph auto-creates on first write.
 5. **Admin schema + first operator** (if you run the admin console). Apply
    `db/admin-schema.sql` as the application role, then create the first operator
    with `python -m kwim_api.admin_bootstrap --username <name>` (see
@@ -66,9 +100,15 @@ The order matters: each step provisions substrate the next depends on.
 
    The service starts without this schema and keeps authenticating teams from
    `KWIM_API_KEYS`; the admin routes return 503 until it exists.
-6. **Deploy the workloads.** Apply `k8s/` (see `k8s/kustomization.yaml`): FalkorDB,
-   kwim-service, embedder, LiteLLM, the code-graph CronJob, and network policies. Your
-   secrets mechanism materializes `/secrets`; `with-secrets.sh` loads them.
+6. **Deploy the workloads.** Apply `k8s/base` through your overlay (the header of
+   `k8s/base/kustomization.yaml` lists what the overlay must supply): FalkorDB,
+   kwim-service, embedder, kwim-console, and the code-graph CronJob. Your secrets
+   mechanism materializes `/secrets`; `with-secrets.sh` loads them.
+
+   Not in the base:
+   - the model gateway (Prerequisites)
+   - network policies: if your cluster denies by default, supply your own
+   - the distiller, which runs as one CronJob per team
 7. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
    goes into `promote-keys`, which gates `/wisdom/promote`, `/wisdom/seed`, and review.
 8. **Provision your first team** (once per team). Two doors, same template: apply the
@@ -93,9 +133,14 @@ The order matters: each step provisions substrate the next depends on.
 ## Verify
 
 - `kwim-service` is Running and `/health` is green.
-- A team API key can `POST /v1/knowledge/propose` and the fact appears via
-  `GET /v1/knowledge/facts`.
-- `GET /v1/memory/context?subject=...` returns a warm-start bundle with coverage markers.
+- A team API key can `POST /v1/knowledge/propose`. It returns `202` with a
+  `proposal_id`; the gate decides asynchronously, and
+  `GET /v1/proposals/{proposal_id}` reports `committed`, `pending_review`, or
+  `rejected`. A committed fact is readable through `GET /v1/knowledge/query`
+  (filter with `about=`). Proposing the same fact again is rejected or held as a
+  duplicate, which is the gate working.
+- `GET /v1/memory/context?session_id=...&subject=...` returns a warm-start bundle with
+  coverage markers. `session_id` is required.
 
 ## How configuration flows
 
