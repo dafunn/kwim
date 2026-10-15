@@ -66,7 +66,8 @@ def call(monkeypatch):
             falkor=_FakeFalkor(facts=facts, rules=rules, raise_on_facts=raise_on_facts),
             pg=_FakePg(events=recent or []),
         ))
-        team = TeamContext(team="acme", key_id="devkey")
+        team = TeamContext(team="acme", key_id="devkey",
+                           capabilities=frozenset({"read", "propose"}))
         return await _memory_context_handler(
             session_id="s1", subject=subject, team=team,
         )

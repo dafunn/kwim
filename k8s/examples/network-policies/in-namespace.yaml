@@ -1,0 +1,137 @@
+# Deny everything, then allow DNS and the traffic between KWIM's own pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Every pod resolves names through the cluster DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# FalkorDB answers kwim-service and the code-graph job only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: falkordb-ingress
+spec:
+  podSelector:
+    matchLabels: { app: falkordb }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: kwim-service }
+        - podSelector:
+            matchLabels: { app: kwim-codegraph }
+      ports:
+        - { port: 6379, protocol: TCP }
+---
+# The embedder answers kwim-service and the code-graph job only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: embedder-ingress
+spec:
+  podSelector:
+    matchLabels: { app: embedder }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: kwim-service }
+        - podSelector:
+            matchLabels: { app: kwim-codegraph }
+      ports:
+        - { port: 80, protocol: TCP }
+---
+# kwim-service reaches FalkorDB and the embedder; its external egress is in
+# external.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-service-egress-internal
+spec:
+  podSelector:
+    matchLabels: { app: kwim-service }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: falkordb }
+      ports:
+        - { port: 6379, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels: { app: embedder }
+      ports:
+        - { port: 80, protocol: TCP }
+---
+# The distiller calls kwim-service in this namespace; kwim-service accepts it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-service-ingress-internal
+spec:
+  podSelector:
+    matchLabels: { app: kwim-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: distiller }
+      ports:
+        - { port: 8000, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: distiller-egress-internal
+spec:
+  podSelector:
+    matchLabels: { app: distiller }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: kwim-service }
+      ports:
+        - { port: 8000, protocol: TCP }
+---
+# The code-graph job reaches FalkorDB and the embedder; its external egress
+# (RabbitMQ, the git host) is in external.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codegraph-egress-internal
+spec:
+  podSelector:
+    matchLabels: { app: kwim-codegraph }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: falkordb }
+      ports:
+        - { port: 6379, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels: { app: embedder }
+      ports:
+        - { port: 80, protocol: TCP }

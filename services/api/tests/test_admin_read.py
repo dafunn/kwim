@@ -123,8 +123,8 @@ class FakeAdminStore:
         self.audit_rows.append(row)
 
     async def list_audit(self, *, team=None, operator_id=None, action=None, since=None,
-                         cursor=None, limit=100):
-        self.calls.append(("list_audit", team, operator_id, action, since, cursor, limit))
+                         before_seq=None, limit=100):
+        self.calls.append(("list_audit", team, operator_id, action, since, before_seq, limit))
         rows = self.audit_rows
         if team is not None:
             rows = [r for r in rows if r["team"] == team]
@@ -135,8 +135,8 @@ class FakeAdminStore:
         if since is not None:
             rows = [r for r in rows if r["at"] >= since]
         rows = sorted(rows, key=lambda r: r["seq"], reverse=True)
-        if cursor is not None:
-            rows = [r for r in rows if r["seq"] < cursor]
+        if before_seq is not None:
+            rows = [r for r in rows if r["seq"] < before_seq]
         return rows[:limit]
 
 
@@ -266,12 +266,12 @@ class FakePgStore:
         return rows
 
     async def list_proposals(self, team, *, resolved="false", resolution=None, object_type=None,
-                             source_kind=None, cursor=None, limit=50):
-        self.calls.append(("list_proposals", team, resolved, resolution, object_type, cursor, limit))
+                             source_kind=None, before=None, limit=50):
+        self.calls.append(("list_proposals", team, resolved, resolution, object_type, before, limit))
         rows = self._filter_proposals(team, resolved, resolution, object_type, source_kind)
         rows = sorted(rows, key=lambda r: (r["created_at"], r["proposal_id"]), reverse=True)
-        if cursor is not None:
-            ck, cid = cursor["created_at"], cursor["id"]
+        if before is not None:
+            ck, cid = before["created_at"], before["id"]
             rows = [r for r in rows if (r["created_at"], r["proposal_id"]) < (ck, cid)]
         return rows[:limit]
 

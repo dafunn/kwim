@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
-from ..auth import CurrentTeam, TeamContext
+from ..auth import CurrentTeam, TeamContext, require_capability
 from ..config import settings
 from ..freshness import worst_freshness
 from ..models import (
@@ -33,6 +33,7 @@ router = APIRouter(prefix="/v1/memory", tags=["memory"])
 
 @router.post("/episodic", response_model=EventAccepted, status_code=status.HTTP_202_ACCEPTED)
 async def memory_episodic(event: EpisodicEvent, team: TeamContext = CurrentTeam):
+    require_capability(team, "propose")
     # Write to Postgres, then publish on the bus.
     event_id = await State.pg.append_episodic(team.team, event.model_dump())
     await State.bus.publish(team.team, "episodic", {"event_id": event_id, **event.model_dump()})
@@ -49,6 +50,7 @@ async def memory_episodic_window(
     """Windowed read over the team's episodic events. `since_ts`/`since_id` is an
     exclusive cursor: a lower bound for `order=asc` (default), an upper bound for
     `order=desc`; omit both to read from the start or end."""
+    require_capability(team, "read")
     if (since_ts is None) != (since_id is None):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail="since_ts and since_id must be provided together")
@@ -94,6 +96,7 @@ async def memory_context(
     then semantic matches), approved rules for the situation, recent events and
     code, with coverage markers. See docs/DESIGN.md, "Retrieval".
     """
+    require_capability(team, "read")
     situation = _situation_params(request)
     recent = await State.pg.recent_episodic(team.team, session_id)
     wisdom_rows = await State.falkor.query_rules(
@@ -209,6 +212,7 @@ async def memory_semantic(
 
     Metadata filters are open ?meta.<key>=<value> params.
     """
+    require_capability(team, "read")
     filters: dict[str, Any] = {}
     # Parse any meta.* query params.
     qp = getattr(request, "query_params", None)
@@ -234,6 +238,7 @@ async def memory_semantic_write(body: SemanticWrite, request: Request,
                                 team: TeamContext = CurrentTeam):
     """Write a semantic item directly through the gate (commit_log row, then the
     node). Generates an id if none is given."""
+    require_capability(team, "propose")
     item_id = body.id or str(uuid.uuid4())
     await request.app.state.gate.commit_semantic(
         team.team, item_id, body.content, body.metadata, proposed_by=team.key_id)
@@ -242,6 +247,7 @@ async def memory_semantic_write(body: SemanticWrite, request: Request,
 
 @router.get("/working/{session}/{key}")
 async def memory_working_get(session: str, key: str, team: TeamContext = CurrentTeam):
+    require_capability(team, "read")
     v = await State.falkor.working_get(team.team, session, key)
     if v is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="no such working-memory key")
@@ -251,5 +257,6 @@ async def memory_working_get(session: str, key: str, team: TeamContext = Current
 @router.put("/working/{session}/{key}")
 async def memory_working_put(session: str, key: str, body: WorkingWrite,
                              team: TeamContext = CurrentTeam):
+    require_capability(team, "propose")
     await State.falkor.working_set(team.team, session, key, str(body.value), body.ttl_seconds)
     return {"status": "ok"}

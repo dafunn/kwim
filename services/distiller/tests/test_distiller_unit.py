@@ -438,3 +438,61 @@ class TestPreflight:
 
         assert seen, "run() performed no reads"
         assert all(seen), f"non-strict read(s) in the distiller: {seen}"
+
+
+class TestRecalledKnowledge:
+    """Items an agent recalled from KWIM (`event_data.recalled`) are shown once, as
+    already known, and never inside the events."""
+
+    _RECALLED_EVENTS = [
+        {"id": "evt-1", "agent_id": "agent-a", "session_id": "s1", "event_type": "cli_turn",
+         "event_data": {"request": "when do backups run?", "response": "02:15 UTC",
+                        "recalled": [{"kind": "semantic", "id": "runbook:backups",
+                                      "text": "Nightly snapshots start at 02:15 UTC."}]},
+         "occurred_at": _T1},
+        {"id": "evt-2", "agent_id": "agent-a", "session_id": "s1", "event_type": "cli_turn",
+         "event_data": {"request": "again?", "response": "02:15 UTC",
+                        "recalled": [{"kind": "semantic", "id": "runbook:backups",
+                                      "text": "Nightly snapshots start at 02:15 UTC."},
+                                     {"kind": "fact", "id": "fact-9",
+                                      "text": "quokka-07 is the backup host."}]},
+         "occurred_at": _T2},
+    ]
+
+    @pytest.mark.asyncio
+    async def test_recalled_items_listed_once_and_kept_out_of_events(self, distiller_app, monkeypatch):
+        monkeypatch.setattr(distiller_app, "read_episodic",
+                            _no_watermark_window(self._RECALLED_EVENTS, _NEXT_CURSOR))
+        fake_llm = _FakeLLM("[]")
+        monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: fake_llm)
+        monkeypatch.setattr(distiller_app, "knowledge_propose", AsyncMock())
+        monkeypatch.setattr(distiller_app, "wisdom_propose", AsyncMock())
+        monkeypatch.setattr(distiller_app, "_post", AsyncMock(return_value={"event_id": "wm1"}))
+
+        await distiller_app.run()
+
+        human = fake_llm.calls[0][-1].content
+        events_json, _, known = human.partition("\n\nAlready in KWIM")
+        assert "recalled" not in events_json and "Nightly snapshots" not in events_json
+        assert known.count("Nightly snapshots start at 02:15 UTC.") == 1   # deduplicated by id
+        assert "quokka-07 is the backup host." in known
+        assert "[semantic]" in known and "[fact]" in known
+
+    @pytest.mark.asyncio
+    async def test_no_recalled_items_leaves_the_prompt_unchanged(self, distiller_app, monkeypatch):
+        monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(_EVENTS, _NEXT_CURSOR))
+        fake_llm = _FakeLLM("[]")
+        monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: fake_llm)
+        monkeypatch.setattr(distiller_app, "knowledge_propose", AsyncMock())
+        monkeypatch.setattr(distiller_app, "wisdom_propose", AsyncMock())
+        monkeypatch.setattr(distiller_app, "_post", AsyncMock(return_value={"event_id": "wm1"}))
+
+        await distiller_app.run()
+
+        human = fake_llm.calls[0][-1].content
+        assert "Already in KWIM" not in human
+        assert human == distiller_app._format_events(_EVENTS)[0]
+
+    def test_system_prompt_names_recalled_knowledge_and_tool_output(self, distiller_app):
+        assert "Already in KWIM" in distiller_app._SYSTEM_PROMPT
+        assert "tool output" in distiller_app._SYSTEM_PROMPT

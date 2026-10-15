@@ -28,6 +28,9 @@ embedder:
   # Must match the embedder's model; changing it requires rebuilding every graph.
   dim: 384
   timeout_s: 10.0
+  # Inputs per /embed request. Must not exceed the embedder's own
+  # max_client_batch_size (32 by default in text-embeddings-inference).
+  max_batch: 32
 
 retrieval:
   episodic_max_limit: 2000      # hard cap on a single episodic-window page

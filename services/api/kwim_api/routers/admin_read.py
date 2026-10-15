@@ -349,7 +349,7 @@ async def admin_proposals(
 
     rows = await State.pg.list_proposals(team, resolved=resolved, resolution=resolution,
                                          object_type=object_type, source_kind=source_kind,
-                                         cursor=decoded, limit=limit)
+                                         before=decoded, limit=limit)
     items = [
         {"proposal_id": str(r["proposal_id"]), "object_type": r["object_type"],
          "proposed_by": r["proposed_by"], "created_at": r["created_at"].isoformat(),
@@ -463,7 +463,7 @@ async def admin_audit(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="malformed cursor")
 
     rows = await State.admin.list_audit(team=team, operator_id=operator, action=action,
-                                        since=parsed_since, cursor=decoded_seq, limit=limit)
+                                        since=parsed_since, before_seq=decoded_seq, limit=limit)
     items = [{**r, "at": r["at"].isoformat()} for r in rows]
     next_cursor = _next_cursor(items, limit, lambda r: {"seq": r["seq"]})
     return {"items": items, "next_cursor": next_cursor, "total": None}

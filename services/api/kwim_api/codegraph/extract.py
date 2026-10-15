@@ -10,8 +10,9 @@
 Run:
   python -m kwim_api.codegraph.extract --team <team> --repo <name> --path <checkout> [--no-embed]
 
-Files whose xxh3 hash matches the graph are not rewritten, but every file is
-parsed so calls across files resolve.
+Files whose xxh3 hash matches the graph are not rewritten, unless one of their
+functions has no embedding, but every file is parsed so calls across files
+resolve.
 """
 from __future__ import annotations
 
@@ -42,6 +43,10 @@ async def extract_repo(
     commit = incremental.git_head(repo_dir)
     files = incremental.discover(repo_dir)
     prior_hashes = await store.code_files_by_hash(team, repo)
+    # Files whose functions lost their embeddings (an embed call that failed)
+    # are rewritten even when unchanged, so a later run repairs them.
+    unembedded = (await store.code_files_missing_embeddings(team, repo)
+                  if embedder is not None else set())
 
     # Read + parse every file (full registry needed for resolution).
     parsed: list[parse.ParsedFile] = []
@@ -53,7 +58,8 @@ async def extract_repo(
         except OSError:
             continue
         h = incremental.content_hash(data)
-        file_meta[rel] = {"hash": h, "lang": lang, "changed": prior_hashes.get(rel) != h}
+        changed = prior_hashes.get(rel) != h or rel in unembedded
+        file_meta[rel] = {"hash": h, "lang": lang, "changed": changed}
         try:
             parsed.append(parse.parse_python(rel, data))
         except Exception as exc:                       # never let one bad file abort the run

@@ -1,5 +1,9 @@
 # KWIM admin console: nginx serving the static app. The browser calls
 # kwim-service through the same ingress; this pod holds no credentials.
+#
+# The console needs the admin API, which is off by default: set
+# KWIM_ADMIN_ENABLED=true on kwim-service and apply db/admin-schema.sql (see
+# docs/deployment.md, step 5). Until then every /v1/admin call returns 503.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +25,9 @@ spec:
         app.kubernetes.io/name: kwim-console
         app.kubernetes.io/part-of: kwim
     spec:
+      # Pull secret for a private registry. If it does not exist, the kubelet logs a
+      # warning and pulls anonymously, so a public registry needs nothing.
+      imagePullSecrets: [{ name: registry-credentials }]
       containers:
         - name: kwim-console
           # Bare image name; set your registry + tag via the kustomize `images:`

@@ -22,7 +22,9 @@ spec:
         app.kubernetes.io/name: embedder
         app.kubernetes.io/part-of: kwim
     spec:
-      # Add imagePullSecrets here (or via an overlay) if your registry is private.
+      # Pull secret for a private registry. If it does not exist, the kubelet logs a
+      # warning and pulls anonymously, so a public registry needs nothing.
+      imagePullSecrets: [{ name: registry-credentials }]
       containers:
         - name: embedder
           # Bare image name; set registry + tag via the `images:` transformer in your overlay.

@@ -8,14 +8,18 @@
 # What you must provide in your environment (the base only references them):
 #   - image registry + tags for `kwim-service` / `kwim-console` / `kwim-embedder`
 #     (kustomize `images:`)
-#   - a pull secret named `registry-credentials` (or edit imagePullSecrets)
+#   - for a private registry, a pull Secret named `registry-credentials` in the
+#     namespace; every workload references it, and without it images are pulled
+#     anonymously (the kubelet logs a warning)
 #   - Secrets: kwim-db, kwim-rabbitmq, kwim-falkordb, kwim-api-keys, falkordb-auth,
 #     and kwim-codegraph-git-token (provide via any secret manager)
 #   - backend hosts (Postgres/RabbitMQ) reachable at the configured KWIM_*_HOST
 #   - external routing (an Ingress or equivalent) for kwim-service and
 #     kwim-console - both are ClusterIP here. If it terminates plain HTTP rather
 #     than TLS, also set KWIM_ADMIN_SECURE_COOKIE=false on kwim-service.
-#   - NetworkPolicies, if your cluster default-denies
+#   - NetworkPolicies, if your cluster default-denies: start from
+#     k8s/examples/network-policies/
+#   - a distiller CronJob per team: k8s/examples/distiller/ (image `distiller`)
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: kwim

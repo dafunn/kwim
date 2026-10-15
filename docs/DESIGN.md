@@ -44,7 +44,7 @@ commits them, rejects them, or routes them to a human.
 
 | Kind | Decision |
 |---|---|
-| fact | evidence check, then an embedding screen: a near-identical fact is rejected as a duplicate, a close one goes to review, anything else commits |
+| fact | evidence check, then an embedding screen: a near-identical fact is rejected as a duplicate, a close one goes to review; a fact close to curated semantic memory also goes to review; anything else commits |
 | advisory | evidence check, then a count of distinct sessions behind the evidence (NELL-style); commits at `gate.auto_commit_threshold` sessions, otherwise review |
 | constraint | always review; enforcement policy is not auto-committed |
 | reinforce | adds evidence to an approved advisory without a new node; commits directly, since it makes no new claim |
@@ -65,6 +65,13 @@ commits them, rejects them, or routes them to a human.
   `about` refs, so two similar statements about different entities are not
   duplicates. The proposal's own `supersedes` target is excluded, so a changed
   statement replaces its predecessor rather than colliding with it.
+- **The screen also checks curated memory.** A fact that passes the fact
+  screen is compared with the team's curated semantic items (runbook chunks and
+  other items written directly, not copies of episodic events). Within
+  `gate.review_distance` it goes to review, never rejection: an agent that
+  repeats what it recalled would otherwise turn existing memory into a new fact.
+  Copies of episodic events carry an `event_id` and are skipped, since a fact
+  distilled from an event always resembles that event's own copy.
 - **The screen is not the read path.** The gate's duplicate search and the
   agents' semantic search are separate queries. Changing how retrieval matches
   must never change what the gate rejects.
@@ -209,7 +216,19 @@ single-use and a failed confirmation still uses it up.
   before it reaches a hash or a query.
 - **Capabilities.** `read`, `propose`, `review`, `promote`. A key grants exactly
   what it carries; no capability means none, never "anyone". Unknown capability
-  names are rejected when a key is minted.
+  names are rejected when a key is minted. Every team-key route requires one:
+
+  | Capability | Routes |
+  |---|---|
+  | `read` | `GET /v1/knowledge/query`, `/search`, `/facts/{fact_id}`, `/audit/{fact_id}`; `GET /v1/memory/episodic`, `/context`, `/semantic`, `/working/{session}/{key}`; `GET /v1/wisdom/rules`; `POST /v1/wisdom/check`; `GET /v1/proposals/{proposal_id}`; `GET /v1/code/search`, `/trace/{fn_id}`, `/architecture`, `/changes`; `GET /v1/review/pending` |
+  | `propose` | `POST /v1/knowledge/propose`, `POST /v1/knowledge/facts/{fact_id}/reaffirm`; `POST /v1/wisdom/propose`; `POST /v1/memory/episodic`, `POST /v1/memory/semantic`, `PUT /v1/memory/working/{session}/{key}` |
+  | `review` | `POST /v1/review/{proposal_id}/approve`, `/reject`; `POST /v1/review/committed/{object_id}/retract` |
+  | `promote` | `POST /v1/wisdom/promote/{rule_id}`, `POST /v1/wisdom/seed` |
+
+  `POST /v1/wisdom/check` evaluates an action and writes nothing, so it is a
+  read. The memory writes are `propose`: an agent writing into its team's
+  memory. `POST /v1/review/mm-action` and `/committed-action` take no team key;
+  they are authenticated by the review surface's own secret.
 - **Resolution and caching.** A resolved key is cached in-process for
   `admin.key_cache_ttl_seconds`. A cache hit skips the database, never the
   secret comparison: the hash travels with the cached entry and every request is
@@ -219,8 +238,9 @@ single-use and a failed confirmation still uses it up.
   `last_used_at` is updated once per cache fill, best-effort, so bookkeeping
   never turns a valid key into a 500.
 - **Legacy keys.** Keys in `KWIM_API_KEYS` keep working while `kwim_admin` is
-  absent or the bearer value is not in the new format, with capabilities taken
-  from the `KWIM_PROMOTE_KEYS` / `KWIM_REVIEW_KEYS` prefix lists. A well-formed
+  absent or the bearer value is not in the new format. Each carries `read` and
+  `propose`, plus `promote` and `review` from the `KWIM_PROMOTE_KEYS` /
+  `KWIM_REVIEW_KEYS` prefix lists. A well-formed
   key that is not in the store is a 401; it never falls back. Each legacy key
   logs once per process until imported, so the log going quiet means the import
   is done. `admin_import_keys` mints one new key per legacy entry, never one per
@@ -273,8 +293,8 @@ warning and does not fail the request.
 
 ### The review surface
 
-Any team key can read its own review queue; approving and rejecting need
-`review`. Mattermost buttons call `/v1/review/mm-action` and
+A key with `read` can list its own team's review queue; approving and rejecting
+need `review`. Mattermost buttons call `/v1/review/mm-action` and
 `/v1/review/committed-action`, which have no team key: they are authenticated by
 a shared secret embedded in the button, and answer 403 when
 `KWIM_MM_ACTION_SECRET` is unset.

@@ -9,8 +9,8 @@
 # --- Stage 1: download the model (build-time only, has egress) ---
 # python:3.x-slim installs Python into /usr/local and is not PEP 668
 # "externally managed", so pip install works without any override.
-FROM python:3.11-slim AS downloader
-RUN pip install --no-cache-dir huggingface-hub==0.25.0
+FROM docker.io/library/python:3.14-slim AS downloader
+RUN pip install --no-cache-dir huggingface-hub==2.2.0
 # HF Hub default read timeout is 10s (too short for CDN blips); raise to 60s.
 ENV HF_HUB_DOWNLOAD_TIMEOUT=60
 # Pinned to a specific model revision for reproducibility.
@@ -19,7 +19,7 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT=60
 # python body inside RUN is a Dockerfile parse error. Fails the build (exit 1) only
 # after 3 failed attempts.
 RUN for attempt in 1 2 3; do \
-        python -c "from huggingface_hub import snapshot_download; snapshot_download('sentence-transformers/all-MiniLM-L6-v2', local_dir='/models/all-MiniLM-L6-v2', local_dir_use_symlinks=False, revision='1110a243fdf4706b3f48f1d95db1a4f5529b4d41')" \
+        python -c "from huggingface_hub import snapshot_download; snapshot_download('sentence-transformers/all-MiniLM-L6-v2', local_dir='/models/all-MiniLM-L6-v2', revision='1110a243fdf4706b3f48f1d95db1a4f5529b4d41')" \
             && exit 0; \
         echo "model download attempt ${attempt} failed; retrying in 5s..." >&2; \
         sleep 5; \

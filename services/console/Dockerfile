@@ -3,7 +3,7 @@
 #   docker build -f services/console/Dockerfile -t <tag> services/console
 #
 # src/api/schema.d.ts is committed; scripts/generate-api-types.sh regenerates it.
-FROM node:22-slim AS build
+FROM docker.io/library/node:24-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci
@@ -12,7 +12,7 @@ RUN npm run build
 
 # Runtime stage carries no node runtime and no build tooling - just the
 # built static assets and a web server.
-FROM nginx:stable-alpine
+FROM docker.io/library/nginx:stable-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

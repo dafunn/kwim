@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from ..auth import CurrentTeam, TeamContext
+from ..auth import CurrentTeam, TeamContext, require_capability
 from ..models import CodeArchitecture, CodeChange, CodeFunction
 from ..runtime import State
 from .common import best_effort
@@ -36,6 +36,7 @@ async def code_search(
     team: TeamContext = CurrentTeam,
 ):
     """Find functions by semantic query (`q`, embedded) or exact `name`, repo-scoped."""
+    require_capability(team, "read")
     qvec = None
     if q:
         embedded = await best_effort(
@@ -56,6 +57,7 @@ async def code_trace(
 ):
     """Call-chain trace. direction=outbound (callees/deps) | inbound (callers/impact).
     Filter out low-trust edges with min_confidence."""
+    require_capability(team, "read")
     if direction not in ("outbound", "inbound"):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                              detail="direction must be 'outbound' or 'inbound'")
@@ -70,6 +72,7 @@ async def code_trace(
 @router.get("/architecture", response_model=CodeArchitecture)
 async def code_architecture(repos: list[str] | None = Query(None), team: TeamContext = CurrentTeam):
     """High-level structure: communities (modules) + their representative hub functions."""
+    require_capability(team, "read")
     arch = await State.falkor.code_architecture(team.team, repos=repos)
     await _emit_code_observation(team.team, "architecture", {"repos": repos},
                                  {"communities": len(arch.get("communities", []))})
@@ -79,6 +82,7 @@ async def code_architecture(repos: list[str] | None = Query(None), team: TeamCon
 @router.get("/changes", response_model=list[CodeChange])
 async def code_changes(repo: str, commit: str, team: TeamContext = CurrentTeam):
     """Files whose indexed commit differs from `commit` - the impact surface."""
+    require_capability(team, "read")
     rows = await State.falkor.code_changed_since(team.team, commit=commit, repo=repo)
     await _emit_code_observation(team.team, "changes", {"repo": repo, "commit": commit},
                                  {"n": len(rows)})

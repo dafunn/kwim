@@ -1,0 +1,97 @@
+# Traffic to and from services outside KWIM's namespace. Replace every
+# <placeholder> with your cluster's values; the ports are the services'
+# defaults, so change them too if yours differ. A service outside the cluster
+# needs an ipBlock instead of the namespaceSelector.
+#
+# kwim-service: PostgreSQL and RabbitMQ.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-service-egress-external
+spec:
+  podSelector:
+    matchLabels: { app: kwim-service }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <postgres-namespace> }
+      ports:
+        - { port: 5432, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <rabbitmq-namespace> }
+      ports:
+        - { port: 5672, protocol: TCP }
+---
+# Who may call kwim-service: your ingress controller, and the namespaces your
+# agents run in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-service-ingress-external
+spec:
+  podSelector:
+    matchLabels: { app: kwim-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <ingress-controller-namespace> }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <agent-namespace> }
+      ports:
+        - { port: 8000, protocol: TCP }
+---
+# The console is served through your ingress controller only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-console-ingress
+spec:
+  podSelector:
+    matchLabels: { app: kwim-console }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <ingress-controller-namespace> }
+      ports:
+        - { port: 80, protocol: TCP }
+---
+# The distiller calls the model gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: distiller-egress-external
+spec:
+  podSelector:
+    matchLabels: { app: distiller }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <model-gateway-namespace> }
+      ports:
+        - { port: 4000, protocol: TCP }
+---
+# The code-graph job: RabbitMQ for its proposals, and HTTPS to the git host it
+# clones from (usually outside the cluster).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codegraph-egress-external
+spec:
+  podSelector:
+    matchLabels: { app: kwim-codegraph }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: <rabbitmq-namespace> }
+      ports:
+        - { port: 5672, protocol: TCP }
+    - to:
+        - ipBlock: { cidr: <git-host-cidr> }
+      ports:
+        - { port: 443, protocol: TCP }

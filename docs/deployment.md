@@ -20,7 +20,7 @@ discipline when you adapt this.
 | **Model gateway** | Intelligence - routes model calls (LiteLLM, or any OpenAI-compatible gateway) | yes - you supply it |
 | **kwim-service** | the K/W/M HTTP/JSON API + the gate + the code-graph extractor | this repo (`services/api/`) |
 | **embedder** | sentence embeddings for the semantic + dedup paths | this repo (`services/api/Dockerfile.embedder`) |
-| **kwim-console** | the admin console, a static app over `/v1/admin` | this repo (`services/console/`) |
+| **kwim-console** | the admin console, a static app over `/v1/admin`; needs `KWIM_ADMIN_ENABLED=true` on kwim-service (step 5) | this repo (`services/console/`) |
 | **distiller** | per-team job that turns episodic events into proposals | this repo (`services/distiller/`) |
 
 The workload manifests are in `k8s/base/`. Reference it from your own kustomize
@@ -67,6 +67,16 @@ The order matters: each step provisions substrate the next depends on.
    directories: they copy `db/` and `clients/python/`. Point your overlay's
    `images:` at the pushed tags, and if the registry is private, give the
    workloads a pull secret.
+
+   kwim-service reports its version at `/health`, from the release tag. Pass it
+   when you build:
+
+   ```bash
+   docker build -f services/api/Dockerfile -t <registry>/kwim-service \
+     --build-arg KWIM_VERSION=$(git describe --tags --match 'kwim-v*' | sed 's/^kwim-v//') .
+   ```
+
+   Without it, `/health` reports `dev`.
 1. **Secrets.** Make these available at `/secrets/` (names from `with-secrets.sh`):
    `db-password`, `rabbitmq-password`, `falkordb-password`, `api-keys`, `promote-keys`,
    and - if you use the review surface - `mm-webhook-url`, `mm-action-secret`. If you run
@@ -85,10 +95,15 @@ The order matters: each step provisions substrate the next depends on.
 
    `POST /v1/admin/teams` refuses the name `universe`, so this step is always by
    hand. FalkorDB's `kwim_universe` graph auto-creates on first write.
-5. **Admin schema + first operator** (if you run the admin console). Apply
-   `db/admin-schema.sql` as the application role, then create the first operator
-   with `python -m kwim_api.admin_bootstrap --username <name>` (see
+5. **Admin schema, first operator, and the admin switch** (if you run the admin
+   console). Apply `db/admin-schema.sql` as the application role, then create the
+   first operator with `python -m kwim_api.admin_bootstrap --username <name>` (see
    `operations.md`). The console cannot create its own first account.
+
+   The `/v1/admin` API the console calls is off by default. Set
+   `KWIM_ADMIN_ENABLED=true` on kwim-service (an env var in your overlay, or
+   `admin.enabled: true` in your `KWIM_CONFIG` file). While it is off, every
+   admin route returns `503` with `admin console disabled`.
 
    Re-apply the schema on every deploy that changes it, not once at bring-up. It
    is idempotent, so applying it unchanged is a no-op; wrap it in your deploy
@@ -105,10 +120,19 @@ The order matters: each step provisions substrate the next depends on.
    kwim-service, embedder, kwim-console, and the code-graph CronJob. Your secrets
    mechanism materializes `/secrets`; `with-secrets.sh` loads them.
 
+   kwim-console is in the base either way, but it does nothing until step 5 is
+   done: without the admin schema and `KWIM_ADMIN_ENABLED=true`, sign-in fails
+   and the page shows the `503` reason.
+
    Not in the base:
    - the model gateway (Prerequisites)
-   - network policies: if your cluster denies by default, supply your own
-   - the distiller, which runs as one CronJob per team
+   - network policies: if your cluster denies by default, start from
+     `k8s/examples/network-policies/`. It allows the traffic between KWIM's own
+     pods as is, and leaves where your PostgreSQL, RabbitMQ, model gateway,
+     ingress controller, and git host run as placeholders to fill in. Agents that
+     call kwim-service from outside the cluster need `off-cluster-agents.yaml`
+     too.
+   - the distiller, which runs as one CronJob per team (step 9)
 7. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
    goes into `promote-keys`, which gates `/wisdom/promote`, `/wisdom/seed`, and review.
 8. **Provision your first team** (once per team). Two doors, same template: apply the
@@ -120,13 +144,19 @@ The order matters: each step provisions substrate the next depends on.
    `kwim_admin.teams` record in the same call. A schema provisioned the first way
    before the console existed can be registered with it later via
    `POST /v1/admin/teams/{team}/adopt` (see `operations.md` -> "Add a team").
-9. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
-10. **(Optional) the code graph.** Set `REPOS` in `k8s/codegraph-extract-cronjob.yaml`
+9. **The distiller** (once per team). It turns the team's episodic events into
+   proposed facts and rules, on a schedule. Copy `k8s/examples/distiller/` for
+   each team and replace `team-a` with the team's name. It needs the `distiller`
+   image (step 0), a Secret `distiller-<team>` with `kwim-api-key` (a key for the
+   team with `read` and `propose`) and `litellm-key` (a key for your model
+   gateway), and `LITELLM_BASE_URL` and `DISTILLER_MODEL` set in the CronJob.
+10. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
+11. **(Optional) the code graph.** Set `REPOS` in `k8s/base/codegraph-extract-cronjob.yaml`
    as `name=owner/repo` pairs where the name is also the team the repo distills into
    (each repo gets its own `kwim_<name>_code` graph and proposes architecture facts into
    its own team's K/W). A daily CronJob runs it; trigger a one-off by creating a Job from
    the CronJob template. See `docs/operations.md` -> "add a repo".
-11. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
+12. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
     service then posts every proposal to a Mattermost channel with Approve / Reject / Forget
     buttons.
 
@@ -142,6 +172,43 @@ The order matters: each step provisions substrate the next depends on.
 - `GET /v1/memory/context?session_id=...&subject=...` returns a warm-start bundle with
   coverage markers. `session_id` is required.
 
+## Upgrading
+
+Apply the new `k8s/base` through your overlay as in step 6, after any schema
+step the release changes (step 5 for `db/admin-schema.sql`).
+
+### From v0.3
+
+v0.3's `k8s/base/falkordb.yaml` set `storageClassName: local-path` in the
+FalkorDB StatefulSet's `volumeClaimTemplates`; later versions leave the storage
+class to the cluster default or your overlay. Kubernetes does not allow
+`volumeClaimTemplates` to change on a live StatefulSet, so applying the new base
+over a v0.3 install fails:
+
+```
+The StatefulSet "falkordb" is invalid: spec: Forbidden: updates to statefulset
+spec for fields other than 'replicas', 'ordinals', 'template', ... are forbidden
+```
+
+The other workloads update; FalkorDB keeps running on the old spec. Either:
+
+- **Pin the live value in your overlay.** Keep the storage class the install was
+  created with:
+
+  ```yaml
+  patches:
+    - target: { kind: StatefulSet, name: falkordb }
+      patch: |-
+        - op: add
+          path: /spec/volumeClaimTemplates/0/spec/storageClassName
+          value: local-path
+  ```
+
+- **Recreate the StatefulSet.** `kubectl -n kwim delete statefulset falkordb
+  --cascade=orphan`, then apply again. The pod and its PVC are left in place and
+  the new StatefulSet adopts them, so no data is lost. The existing PVC keeps its
+  storage class; only volumes created later use the new one.
+
 ## How configuration flows
 
 Configuration has two surfaces, split by concern:
@@ -152,7 +219,7 @@ Configuration has two surfaces, split by concern:
     `with-secrets.sh` (the service entrypoint and the wrapper for one-off admin commands
     run via `kubectl exec`).
   - **Connection endpoints** (`KWIM_PG_HOST`, `KWIM_FALKOR_HOST`, `KWIM_RMQ_*`,
-    `KWIM_EMBEDDER_URL`, `OTEL_*`, ...): plain env in `k8s/kwim-service.yaml`. Kept discrete
+    `KWIM_EMBEDDER_URL`, `OTEL_*`, ...): plain env in `k8s/base/kwim-service.yaml`. Kept discrete
     (host/port/user as separate vars, never a URL DSN) because base64 passwords contain
     characters that corrupt URL parsing.
 - **Tunables** - everything that isn't a secret or an endpoint (gate thresholds, decay

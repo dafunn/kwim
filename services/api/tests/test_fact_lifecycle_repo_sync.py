@@ -188,7 +188,8 @@ def call_reaffirm(monkeypatch):
     async def _call(falkor, fact_id, pg=None):
         state = _FakeState(falkor, pg)
         monkeypatch.setattr(main_mod, "State", state)
-        team = TeamContext(team="acme", key_id="devkey")
+        team = TeamContext(team="acme", key_id="devkey",
+                           capabilities=frozenset({"read", "propose"}))
         result = await _knowledge_reaffirm_handler(fact_id, team=team)
         _call.state = state
         return result
@@ -263,7 +264,8 @@ def call_knowledge_query(monkeypatch):
 
     async def _call(falkor, **params):
         monkeypatch.setattr(main_mod, "State", _FakeState(falkor))
-        team = TeamContext(team="acme", key_id="devkey")
+        team = TeamContext(team="acme", key_id="devkey",
+                           capabilities=frozenset({"read", "propose"}))
         return await _knowledge_query_handler(
             team=team,
             fact_type=params.get("fact_type"),

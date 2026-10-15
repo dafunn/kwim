@@ -12,7 +12,16 @@ class Embedder:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed each text, returning one vector per input in the same order.
-        Raises if the response length differs, since callers pair by position."""
+        Sends at most `embedder_max_batch` inputs per request, since the embedder
+        refuses larger batches. Raises if any response length differs, since
+        callers pair by position."""
+        size = max(1, settings.embedder_max_batch)
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), size):
+            vectors.extend(await self._embed_batch(texts[start:start + size]))
+        return vectors
+
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         r = await self._http.post(f"{self._url}/embed", json={"inputs": texts})
         r.raise_for_status()
         vectors = r.json()

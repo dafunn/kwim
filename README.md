@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white" alt="Python 3.14">
   <img src="https://img.shields.io/badge/Kubernetes-326CE5?logo=kubernetes&logoColor=white" alt="Kubernetes">
   <img src="https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/OpenTelemetry-425CC7?logo=opentelemetry&logoColor=white" alt="OpenTelemetry">
@@ -138,11 +138,13 @@ to gate the high-bar operations, which is the shape tool authorization wants.
 
 ## Running the tests
 
-The suites need Python 3.12 and nothing running: the stores, the bus, and the
-embedder are faked. From the repo root:
+The suites need Python 3.14, [uv](https://docs.astral.sh/uv/), and nothing
+running: the stores, the bus, and the embedder are faked. The API and the
+distiller are separate projects, each with its own `pyproject.toml`, `uv.lock`
+and venv. From the repo root:
 
 ```bash
-make venv     # services/api/.venv, from services/api/requirements-dev.txt
+make venv     # services/api/.venv and services/distiller/.venv, from their uv.lock files
 make check    # ruff, then the API and distiller suites, then the client's tests
 ```
 
@@ -150,15 +152,20 @@ make check    # ruff, then the API and distiller suites, then the client's tests
 `test-client`, `lint`). Without make:
 
 ```bash
-python3 -m venv services/api/.venv
-services/api/.venv/bin/pip install -r services/api/requirements-dev.txt
-services/api/.venv/bin/python -m pytest       # both suites; settings in pytest.ini
+(cd services/api && uv sync --frozen --extra dev)
+(cd services/distiller && uv sync --frozen --extra dev)
+services/api/.venv/bin/python -m ruff check .
+services/api/.venv/bin/python -m pytest services/api/tests
+services/distiller/.venv/bin/python -m pytest services/distiller/tests
 cd clients/python && ../../services/api/.venv/bin/python test_kwim.py \
   && ../../services/api/.venv/bin/python test_llm_router.py
 ```
 
 Run pytest from the repo root: `pytest.ini` there sets the import paths and the
 async test mode both suites depend on.
+
+The images build with `docker build .` / `podman build .` and the `-f` paths in
+[docs/deployment.md](docs/deployment.md).
 
 ## Notes
 

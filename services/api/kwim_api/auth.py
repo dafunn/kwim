@@ -45,10 +45,11 @@ _KEY_MAP = _load_key_map()
 
 
 def _legacy_capabilities(key_id: str) -> frozenset[str]:
-    """Capabilities for a legacy key, from the promote_keys and review_keys lists."""
+    """Capabilities for a legacy key: always `read` and `propose`, plus `promote`
+    and `review` from the promote_keys and review_keys lists."""
     promote_ids = {p.strip() for p in settings.promote_keys.split(",") if p.strip()}
     review_ids = {p.strip() for p in settings.review_keys.split(",") if p.strip()}
-    caps = set()
+    caps = {"read", "propose"}
     if key_id in promote_ids:
         caps.add("promote")
     if key_id in review_ids:

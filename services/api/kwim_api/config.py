@@ -181,6 +181,7 @@ class Settings:
     # --- Embedder model shape ---
     embed_dim: int = _cfg("embedder.dim", "KWIM_EMBED_DIM", int, 384)
     embed_timeout_s: float = _cfg("embedder.timeout_s", "KWIM_EMBED_TIMEOUT", float, 10.0)
+    embedder_max_batch: int = _cfg("embedder.max_batch", "KWIM_EMBEDDER_MAX_BATCH", int, 32)
 
     # --- Retrieval / warm-start sizing ---
     episodic_max_limit: int = _cfg("retrieval.episodic_max_limit", "KWIM_EPISODIC_MAX_LIMIT", int, 2000)

@@ -1,0 +1,38 @@
+[project]
+name = "kwim-api"
+# Required by uv for any [project]; never read. The release version is the
+# kwim-v* git tag, stamped into the image as KWIM_VERSION (see Dockerfile).
+version = "0.1.0"
+description = "KWIM service: the knowledge, wisdom and memory HTTP API, the gate and the code-graph extractor"
+requires-python = ">=3.14"
+license = "MIT"
+dependencies = [
+    "fastapi==0.143.0",
+    "uvicorn[standard]==0.54.0",
+    "pydantic==2.14.0",
+    "PyYAML==6.0.3",                       # layered tunables config (kwim_api/config.py + kwim.defaults.yaml)
+    "psycopg[binary]==3.3.6",              # Postgres: episodic + commit_log
+    "psycopg-pool==3.3.3",                 # Postgres connection pool (reconnects after a server restart)
+    "falkordb==1.7.1",                     # FalkorDB graph + vector + working-memory TTL (Redis protocol)
+    "aio-pika==10.1.1",                    # RabbitMQ publish/consume on the /kwim vhost
+    "httpx==0.28.1",                       # Embedder HTTP client (TEI)
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    # Code graph (+T) extractor - kwim_api/codegraph/
+    "tree-sitter==0.26.0",                 # AST parsing (structure extraction)
+    "tree-sitter-python==0.25.0",          # Python grammar (Python-first; add grammars per language)
+    "xxhash==4.0.1",                       # xxh3 content hashing for incremental re-index
+    "networkx==3.7",                       # Louvain community detection (worker-only, not request path)
+    "pathspec==1.1.1",                     # .gitignore/.cgignore matching for discovery
+]
+
+[project.optional-dependencies]
+# Test-only dependencies (not shipped in the service image).
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-timeout==2.4.0",
+    "ruff==0.17.0",                        # lint; config in ruff.toml at the repo root
+]

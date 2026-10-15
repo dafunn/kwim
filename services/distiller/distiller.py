@@ -69,11 +69,16 @@ Rules:
 - Propose, don't decide. You are proposing candidates to a governed gate; a
   duplicate or contradiction will be screened or sent to a human. Prefer
   precision - a wrong durable rule is costly.
-- Do NOT propose constraints (enforcement rules). If you believe one is
+- Do not propose constraints (enforcement rules). If you believe one is
   warranted, omit it - constraints are a human authority decision.
 - If nothing in this window meets the bar, return an empty list.
+- Knowledge the agent recalled from KWIM is listed after the events, under
+  "Already in KWIM". Do not propose it, or anything that restates it: an agent
+  repeating what it recalled is not new evidence.
+- Advisories come from decisions or outcomes that repeat across episodes, not
+  from one episode's description of tool output such as log lines or errors.
 
-Respond with ONLY a JSON array (no prose, no markdown fences). Each element is an
+Respond with only a JSON array (no prose, no markdown fences). Each element is an
 object with a "kind" field of "fact" or "advisory" plus the fields listed above.
 """
 
@@ -85,14 +90,53 @@ def _format_events(events: list[dict]) -> tuple[str, dict[int, str]]:
     compact = []
     for i, e in enumerate(events, start=1):
         ref_to_id[i] = str(e.get("id"))
+        data = e.get("event_data")
+        if isinstance(data, dict) and "recalled" in data:
+            # Recalled knowledge is listed once, apart from the events (_recalled_block).
+            data = {k: v for k, v in data.items() if k != "recalled"}
         compact.append({
             "ref": i,
             "agent_id": e.get("agent_id"),
             "event_type": e.get("event_type"),
-            "event_data": e.get("event_data"),
+            "event_data": data,
             "occurred_at": e.get("occurred_at"),
         })
     return json.dumps(compact, default=str), ref_to_id
+
+
+# Bounds on the "Already in KWIM" block, so a long window cannot crowd out the events.
+_RECALLED_MAX_ITEMS = 50
+_RECALLED_MAX_CHARS = 300
+
+
+def _recalled_block(events: list[dict]) -> str:
+    """The KWIM items agents recalled during the window's turns, from each
+    event's `event_data.recalled` ({kind, id, text}), deduplicated by id. Empty
+    when no event records any."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for e in events:
+        data = e.get("event_data")
+        items = data.get("recalled") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("id") or item.get("text") or "")
+            text = str(item.get("text") or "").strip()
+            if not key or not text or key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- [{item.get('kind', 'item')}] {text[:_RECALLED_MAX_CHARS]}")
+            if len(lines) >= _RECALLED_MAX_ITEMS:
+                break
+        if len(lines) >= _RECALLED_MAX_ITEMS:
+            break
+    if not lines:
+        return ""
+    return ("Already in KWIM - do not propose these or restatements of them:\n"
+            + "\n".join(lines))
 
 
 def _validate_candidate(item: object, ref_to_id: dict[int, str]) -> dict | None:
@@ -173,10 +217,12 @@ async def _distill(events: list[dict]) -> list[dict] | None:
     failed, in which case the watermark must not advance."""
     llm = make_llm(model=os.environ.get("DISTILLER_MODEL"), agent="distiller")
     formatted, ref_to_id = _format_events(events)
+    recalled = _recalled_block(events)
+    human = f"{formatted}\n\n{recalled}" if recalled else formatted
     try:
         response = await llm.ainvoke([
             SystemMessage(content=_SYSTEM_PROMPT),
-            HumanMessage(content=formatted),
+            HumanMessage(content=human),
         ])
         content = response.content if isinstance(response.content, str) else str(response.content)
     except Exception as exc:

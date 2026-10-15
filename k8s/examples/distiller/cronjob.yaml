@@ -1,0 +1,57 @@
+# Distiller for team `team-a` (replace the name throughout).
+#
+# Needs a Secret `distiller-team-a` with two keys, mounted at /secrets:
+#   kwim-api-key  a key for team-a with the read and propose capabilities
+#   litellm-key   a key for your model gateway
+#   kubectl -n kwim create secret generic distiller-team-a \
+#     --from-file=kwim-api-key=<file> --from-file=litellm-key=<file>
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: distiller-team-a
+  labels:
+    app: distiller
+    team: team-a
+    app.kubernetes.io/part-of: kwim
+spec:
+  schedule: "17 * * * *"          # hourly; any cadence works, each run picks up where the last stopped
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: distiller
+            team: team-a
+            app.kubernetes.io/part-of: kwim
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          # Pull secret for a private registry, as in the base.
+          imagePullSecrets: [{ name: registry-credentials }]
+          volumes:
+            - name: secrets
+              secret: { secretName: distiller-team-a }
+          containers:
+            - name: distiller
+              # Bare image name; set registry + tag via the overlay's `images:`.
+              image: distiller:latest
+              env:
+                # kwim-service in this namespace.
+                - { name: KWIM_BASE_URL, value: "http://kwim-service:8000" }
+                # Your OpenAI-compatible model gateway, e.g. LiteLLM.
+                - { name: LITELLM_BASE_URL, value: "http://<model-gateway>:4000/v1" }
+                - { name: DISTILLER_MODEL, value: "<model-name>" }
+                # Optional: events read per run (default 500), and an OTLP
+                # collector for traces.
+                # - { name: DISTILLER_WINDOW_LIMIT, value: "500" }
+                # - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://<collector>:4317" }
+              volumeMounts:
+                - { name: secrets, mountPath: /secrets, readOnly: true }
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }

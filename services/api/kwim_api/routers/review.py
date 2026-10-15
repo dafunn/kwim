@@ -21,7 +21,8 @@ router = APIRouter(prefix="/v1/review", tags=["review"])
 
 @router.get("/pending", response_model=list[PendingProposal])
 async def review_pending(limit: int = 50, team: TeamContext = CurrentTeam):
-    """The team's pending proposals; any team key may read them."""
+    """The team's pending proposals; any key with `read` may list them."""
+    require_capability(team, "read")
     rows = await State.pg.list_pending(team.team, limit=limit)
     return [
         PendingProposal(

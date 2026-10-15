@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--team", required=True)
     m.add_argument("--label", required=True, help="what this key is for, e.g. 'agent runner'")
     m.add_argument("--capability", action="append", default=[],
-                   choices=CAPABILITIES, help="repeatable; omit for a read-only key")
+                   choices=CAPABILITIES, help="repeatable; a key without any can do nothing")
     m.add_argument("--expires-at", help="ISO 8601; omit for no expiry")
 
     r = sub.add_parser("revoke", help="revoke a key by its prefix")

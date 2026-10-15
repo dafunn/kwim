@@ -185,6 +185,17 @@ class CodeGraphStore:
         )
         return {r[0]: r[1] for r in res.result_set}
 
+    async def code_files_missing_embeddings(self, team: str, repo: str) -> set[str]:
+        """Paths of a repo's files holding a function with no embedding - files
+        the extractor must re-embed even when their content is unchanged."""
+        g = await self._code_graph(team)
+        res = await g.query(
+            "MATCH (f:File {repo:$repo})-[:CONTAINS]->(fn:Function) "
+            "WHERE fn.embedding IS NULL RETURN DISTINCT f.path",
+            {"repo": repo},
+        )
+        return {r[0] for r in res.result_set}
+
     async def code_search(
         self, team: str, *, qvec: list[float] | None = None, name: str | None = None,
         repos: list[str] | None = None, limit: int = 10,

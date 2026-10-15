@@ -31,6 +31,7 @@ router = APIRouter(prefix="/v1/wisdom", tags=["wisdom"])
 async def wisdom_rules(request: Request, team: TeamContext = CurrentTeam,
                        limit: int = 20):
     """Approved rules matching every ?situation.<key>=<value> param."""
+    require_capability(team, "read")
     situation = _situation_params(request)
     rows = await State.falkor.query_rules(team.team, situation, limit)
     return [
@@ -58,6 +59,7 @@ async def wisdom_rules(request: Request, team: TeamContext = CurrentTeam,
 @router.post("/propose", response_model=Accepted, status_code=status.HTTP_202_ACCEPTED)
 async def wisdom_propose(proposal: AdvisoryProposal | ConstraintProposal,
                          team: TeamContext = CurrentTeam):
+    require_capability(team, "propose")
     pid = str(uuid.uuid4())
     await State.falkor.proposal_set(pid, {"id": pid, "object_type": "rule", "status": "accepted"})
     await State.bus.publish(team.team, "wisdom.proposed", {
@@ -73,6 +75,7 @@ async def wisdom_check(req: CheckRequest, team: TeamContext = CurrentTeam):
     action["content"]: a critical match escalates, otherwise the highest-severity
     match's verdict wins, and no match allows. Classifier constraints are skipped.
     """
+    require_capability(team, "read")
     # Load approved deterministic constraints only; empty list if none yet.
     all_rules = await State.falkor.query_rules(team.team, limit=settings.rule_scan_limit)
     constraints = [

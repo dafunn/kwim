@@ -1,0 +1,26 @@
+[project]
+name = "kwim-distiller"
+version = "0.1.0"
+description = "KWIM distiller: distills a team's episodic memory into proposed knowledge and wisdom"
+requires-python = ">=3.14"
+license = "MIT"
+# Self-contained distiller deps - the exact subset the distiller + its helpers import.
+# distiller.py: langchain_core.messages; kwim.py: httpx;
+# llm_router.py: langchain_openai; otel.py: opentelemetry-{sdk,exporter,instrumentation}.
+dependencies = [
+    "langchain-openai==1.7.0",
+    "langchain-core==1.6.9",
+    "httpx==0.28.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-grpc==1.45.1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+]
+
+[project.optional-dependencies]
+# The unit tests stub otel, llm_router, and langchain. pytest.ini's asyncio_mode
+# and timeout settings need the two plugins.
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-timeout==2.4.0",
+]

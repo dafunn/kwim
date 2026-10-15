@@ -273,7 +273,8 @@ def call_context(monkeypatch):
         falkor = _CtxFalkor(tag_facts=tag_facts, sem_facts=sem_facts)
         monkeypatch.setattr(main_mod, "State",
                             _CtxState(falkor, embedder or _FakeEmbedder()))
-        team = TeamContext(team="acme", key_id="devkey")
+        team = TeamContext(team="acme", key_id="devkey",
+                           capabilities=frozenset({"read", "propose"}))
         result = await _memory_context_handler(
             session_id="s1", subject=subject, team=team)
         return result, falkor

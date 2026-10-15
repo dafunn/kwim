@@ -1,0 +1,25 @@
+# Example NetworkPolicies for KWIM, for a cluster that denies by default. Not part
+# of the base: copy this directory into your overlay (or reference it), then
+# replace every <placeholder> in external.yaml with where your shared services
+# run. The placeholders are not valid label values, so the API server rejects
+# the policies until they are replaced, instead of accepting rules that match
+# nothing.
+#
+# in-namespace.yaml        traffic between KWIM's own pods; works as is
+# external.yaml            PostgreSQL, RabbitMQ, the model gateway, the ingress
+#                          controller, and the git host; needs your values
+# off-cluster-agents.yaml  optional, not listed below: agents that call
+#                          kwim-service through a NodePort or LoadBalancer
+#
+# Some network plugins also apply policies to the kubelet's health checks. If
+# pods go unready after applying these, allow your nodes' network as an ingress
+# source on the probed ports (8000, 80, 6379).
+#
+# The distiller rules select `app: distiller`, the label the distiller example
+# (../distiller) uses.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kwim
+resources:
+  - in-namespace.yaml
+  - external.yaml

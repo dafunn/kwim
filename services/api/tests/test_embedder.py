@@ -3,9 +3,14 @@
 `Embedder.embed` returns one vector per input or raises; driven over a mock HTTP
 transport.
 """
+import dataclasses
+import json
+
 import httpx
 import pytest
 
+from kwim_api import embedder as embedder_mod
+from kwim_api.config import settings
 from kwim_api.embedder import Embedder
 
 
@@ -70,4 +75,42 @@ async def test_http_error_still_raises_before_the_length_check():
     e = _embedder(_responds({"error": "model not loaded"}, status=503))
     with pytest.raises(httpx.HTTPStatusError):
         await e.embed(["a"])
+    await e.close()
+
+
+def _echoes(sizes: list[int]):
+    """A handler that records each request's batch size and returns one vector
+    per input, holding the input's text so order can be checked."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        inputs = json.loads(request.content)["inputs"]
+        sizes.append(len(inputs))
+        return httpx.Response(200, json=[[float(t)] for t in inputs])
+    return handler
+
+
+async def test_large_input_is_sent_in_batches_and_returned_in_order(monkeypatch):
+    monkeypatch.setattr(embedder_mod, "settings",
+                        dataclasses.replace(settings, embedder_max_batch=32))
+    sizes: list[int] = []
+    e = _embedder(_echoes(sizes))
+    texts = [str(i) for i in range(70)]
+    vectors = await e.embed(texts)
+    assert sizes == [32, 32, 6]
+    assert vectors == [[float(i)] for i in range(70)]
+    await e.close()
+
+
+async def test_a_failed_batch_raises(monkeypatch):
+    monkeypatch.setattr(embedder_mod, "settings",
+                        dataclasses.replace(settings, embedder_max_batch=2))
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 2:
+            return httpx.Response(413, json={"error": "batch too large"})
+        return httpx.Response(200, json=[[0.1], [0.2]])
+    e = _embedder(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        await e.embed(["a", "b", "c", "d"])
     await e.close()

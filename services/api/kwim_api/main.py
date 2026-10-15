@@ -4,6 +4,7 @@ and mounts the routers (one module per surface under `kwim_api/routers/`).
     uvicorn kwim_api.main:app
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -62,8 +63,14 @@ async def lifespan(app: FastAPI):
         await State.admin.close()
 
 
+def release_version() -> str:
+    """The release this build reports: KWIM_VERSION, stamped into the image from
+    the kwim-v* release tag at build time, else `dev`."""
+    return os.environ.get("KWIM_VERSION", "").strip() or "dev"
+
+
 app = FastAPI(
-    title="KWIM", version="0.2.0",
+    title="KWIM", version=release_version(),
     summary="Knowledge - Wisdom - Intelligence - Memory - the contract teams code against.",
     lifespan=lifespan,
 )

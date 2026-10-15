@@ -23,6 +23,6 @@ The KWIM client library.
 ## Tests
 
 ```bash
-pip install httpx pytest
-pytest test_kwim.py -v
+uv sync --frozen --extra dev
+.venv/bin/python -m pytest test_kwim.py -v
 ```

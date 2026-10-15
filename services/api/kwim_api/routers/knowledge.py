@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from ..auth import CurrentTeam, TeamContext
+from ..auth import CurrentTeam, TeamContext, require_capability
 from ..models import (
     Accepted,
     AuditVersion,
@@ -31,6 +31,7 @@ async def knowledge_query(team: TeamContext = CurrentTeam,
                           fact_type: str | None = None, status_: str = "current", limit: int = 50,
                           about: list[str] | None = Query(None),
                           source_kind: str | None = None):
+    require_capability(team, "read")
     rows = await State.falkor.query_facts(team.team, fact_type, status_, limit,
                                           about=about, source_kind=source_kind)
     return [Fact(**r) for r in _enrich_facts(rows)]
@@ -44,6 +45,7 @@ async def knowledge_search(q: str, limit: int = 10, fact_type: str | None = None
     lower is closer), each with its freshness. `about` and `fact_type` filter
     before scoring. See docs/DESIGN.md, "Retrieval".
     """
+    require_capability(team, "read")
     try:
         qvec = (await State.embedder.embed([q]))[0]
     except Exception as exc:
@@ -58,6 +60,7 @@ async def knowledge_search(q: str, limit: int = 10, fact_type: str | None = None
 
 @router.get("/facts/{fact_id}", response_model=FactDetail)
 async def knowledge_fact(fact_id: str, team: TeamContext = CurrentTeam):
+    require_capability(team, "read")
     row = await State.falkor.get_fact_provenance(team.team, fact_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"fact {fact_id} not found")
@@ -75,6 +78,7 @@ async def knowledge_fact(fact_id: str, team: TeamContext = CurrentTeam):
 async def knowledge_reaffirm(fact_id: str, team: TeamContext = CurrentTeam):
     """Stamp last_verified_at = now on a current fact, in the graph (which also
     checks it exists; 404 if not) and then in fact_verifications."""
+    require_capability(team, "propose")
     now = datetime.now(UTC)
     found = await State.falkor.reaffirm_fact(
         team.team, fact_id, verified_at=int(now.timestamp() * 1000))
@@ -85,6 +89,7 @@ async def knowledge_reaffirm(fact_id: str, team: TeamContext = CurrentTeam):
 
 @router.get("/audit/{fact_id}", response_model=FactAudit)
 async def knowledge_audit(fact_id: str, at: str | None = None, team: TeamContext = CurrentTeam):
+    require_capability(team, "read")
     # Returns the full version chain; there is no point-in-time `at` parameter.
     chain = await State.falkor.audit_fact(team.team, fact_id)
     if not chain:
@@ -94,6 +99,7 @@ async def knowledge_audit(fact_id: str, at: str | None = None, team: TeamContext
 
 @router.post("/propose", response_model=Accepted, status_code=status.HTTP_202_ACCEPTED)
 async def knowledge_propose(proposal: FactProposal, team: TeamContext = CurrentTeam):
+    require_capability(team, "propose")
     pid = str(uuid.uuid4())
     await State.falkor.proposal_set(pid, {"id": pid, "object_type": "fact", "status": "accepted"})
     await State.bus.publish(team.team, "knowledge.proposed", {

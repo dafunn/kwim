@@ -263,12 +263,13 @@ class PostgresStore:
     async def list_proposals(
         self, team: str, *, resolved: str = "false", resolution: str | None = None,
         object_type: str | None = None, source_kind: str | None = None,
-        cursor: dict[str, Any] | None = None, limit: int = 50,
+        before: dict[str, Any] | None = None, limit: int = 50,
     ) -> list[dict]:
         """Proposal browse, resolved and unresolved (the rejection audit trail).
 
-        Newest first (`created_at DESC, proposal_id`); `cursor` is `{created_at, id}`,
-        an exclusive bound in that order.
+        Newest first (`created_at DESC, proposal_id`); `before` is `{created_at, id}`,
+        an exclusive bound in that order. (Not named `cursor`: that is the
+        connection helper.)
         """
         s = _schema(team)
         clauses, params = [], []
@@ -286,9 +287,9 @@ class PostgresStore:
             # The same expression pending_stats and reject_pending filter on.
             clauses.append("body->>'source_kind' = %s")
             params.append(source_kind)
-        if cursor is not None:
+        if before is not None:
             clauses.append("(created_at, proposal_id) < (%s, %s)")
-            params.extend([cursor["created_at"], cursor["id"]])
+            params.extend([before["created_at"], before["id"]])
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         params.append(limit)
         async with cursor(self._pool, row_factory=dict_row) as cur:

@@ -182,7 +182,7 @@ class Gate:
         neighbors = [n for n in neighbors if n["id"] not in excluded]
 
         if not neighbors:
-            return None, vec  # no similar facts in the index - clear to commit
+            return await self._screen_against_memory(team, pid, ptype, body, proposal, vec)
 
         nearest = neighbors[0]
         score = nearest["score"]
@@ -201,6 +201,33 @@ class Gate:
             )
             return doc, None
 
+        return await self._screen_against_memory(team, pid, ptype, body, proposal, vec)
+
+    async def _screen_against_memory(
+        self, team: str, pid: str, ptype: str, body: dict[str, Any],
+        proposal: dict[str, Any], vec: list[float],
+    ) -> tuple[dict[str, Any] | None, list[float] | None]:
+        """A fact that restates curated semantic memory (a runbook chunk, a seeded
+        note) goes to review: the similarity check above only sees facts, so an
+        agent repeating what it recalled would otherwise commit it as new.
+
+        Only curated items count. Items derived from episodic events carry an
+        `event_id`, and a fact distilled from an event always resembles that
+        event's own copy. Review, never reject: restating memory can be right."""
+        try:
+            items = await self._falkor.query_semantic(team, vec, limit=10)
+        except Exception as exc:
+            log.warning("gate: semantic memory unavailable for fact screen, skipping: %s", exc)
+            return None, vec
+        curated = [i for i in items if not (i.get("metadata") or {}).get("event_id")]
+        if curated and curated[0]["score"] <= settings.gate_review_distance:
+            nearest = curated[0]
+            doc = await self._route_to_review(
+                team, pid, ptype, body, proposal,
+                detail=f"similar to semantic item {nearest['id']} (d={nearest['score']:.3f}) "
+                       "- restates existing memory",
+            )
+            return doc, None
         return None, vec  # clear to commit
 
     async def _check_evidence(

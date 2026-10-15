@@ -131,7 +131,8 @@ def reaffirm(monkeypatch):
 
     async def _call(falkor, pg, fact_id):
         monkeypatch.setattr(mod, "State", _FakeState(falkor, pg))
-        return await _reaffirm_handler(fact_id, team=TeamContext(team="acme", key_id="devkey"))
+        team = TeamContext(team="acme", key_id="devkey", capabilities=frozenset({"propose"}))
+        return await _reaffirm_handler(fact_id, team=team)
 
     return _call
 

@@ -40,8 +40,9 @@ class _FakePg:
 
 
 class _FakeFalkor:
-    def __init__(self, neighbors=None, objects=None):
+    def __init__(self, neighbors=None, objects=None, semantic=None):
         self._neighbors = neighbors or []        # [{id, statement, status, score}]
+        self._semantic = semantic or []          # [{id, content, metadata, score}]
         self.proposal_sets: list[dict] = []
         self.materialized_facts: list[dict] = []
         self.reinforced: list[dict] = []
@@ -59,6 +60,9 @@ class _FakeFalkor:
                 and all(t in (n.get("about") or []) for t in about)
             ]
         return neighbors[:k]
+
+    async def query_semantic(self, team, qvec=None, limit=10, filters=None):
+        return sorted(self._semantic, key=lambda i: i["score"])[:limit]
 
     async def proposal_set(self, pid, doc):
         self.proposal_sets.append(doc)
@@ -219,6 +223,49 @@ async def test_screen_far_commits_with_embedding():
                                        {"statement": "different statement"}, _proposal(pid="p3"))
     assert doc is None
     assert len(vec or []) == 384
+
+
+async def test_screen_restating_curated_memory_reviews():
+    # No similar fact, but a runbook chunk at d=0.10 -> review, not commit.
+    falkor = _FakeFalkor(semantic=[{"id": "runbook:backups", "content": "Backups run at 02:15",
+                                    "metadata": {"doc_type": "runbook"}, "score": 0.10}])
+    gate = _make_gate(pg=_FakePg({}), falkor=falkor, embedder=_FakeEmbedder())
+    doc, vec = await gate._screen_fact("acme", "p5", "fact",
+                                       {"statement": "Backups start at 02:15 UTC"}, _proposal(pid="p5"))
+    assert doc is not None
+    assert doc["status"] == "pending_review"
+    assert "semantic item runbook:backups" in doc["detail"]
+    assert vec is None
+
+
+async def test_screen_far_from_curated_memory_commits():
+    falkor = _FakeFalkor(semantic=[{"id": "runbook:backups", "content": "Backups run at 02:15",
+                                    "metadata": {"doc_type": "runbook"}, "score": 0.60}])
+    gate = _make_gate(falkor=falkor, embedder=_FakeEmbedder())
+    doc, vec = await gate._screen_fact("acme", "p6", "fact",
+                                       {"statement": "The ledger listens on 7443"}, _proposal(pid="p6"))
+    assert doc is None and vec
+
+
+async def test_screen_ignores_episodic_copies_in_semantic_memory():
+    # A fact distilled from an event always resembles that event's own semantic
+    # copy (it carries an event_id); only curated items count.
+    falkor = _FakeFalkor(semantic=[{"id": "ev-1", "content": "backup host is quokka-07",
+                                    "metadata": {"event_id": "ev-1", "event_type": "cli_turn"},
+                                    "score": 0.02}])
+    gate = _make_gate(falkor=falkor, embedder=_FakeEmbedder())
+    doc, vec = await gate._screen_fact("acme", "p7", "fact",
+                                       {"statement": "The backup host is quokka-07"}, _proposal(pid="p7"))
+    assert doc is None and vec
+
+
+async def test_screen_fact_match_still_wins_over_memory():
+    # A duplicate fact is rejected before semantic memory is consulted.
+    falkor = _FakeFalkor(neighbors=[{"id": "fact-A", "statement": "x", "status": "current", "score": 0.01}],
+                         semantic=[{"id": "runbook:x", "content": "x", "metadata": {}, "score": 0.01}])
+    gate = _make_gate(falkor=falkor, embedder=_FakeEmbedder())
+    doc, _ = await gate._screen_fact("acme", "p8", "fact", {"statement": "x"}, _proposal(pid="p8"))
+    assert doc["status"] == "rejected" and "fact-A" in doc["detail"]
 
 
 async def test_screen_supersedes_target_excluded():

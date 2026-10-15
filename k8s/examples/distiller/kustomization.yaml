@@ -1,0 +1,12 @@
+# Example distiller deployment for one team. The distiller reads a team's
+# episodic events, asks the model for durable facts and rules, and proposes them
+# through the gate. One CronJob per team: copy this directory once per team and
+# replace `team-a` everywhere (names, labels, the Secret) with the team's name.
+#
+# The overlay that includes it sets the image (`images:` name `distiller`) and
+# provides the Secret below. Not part of the base.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kwim
+resources:
+  - cronjob.yaml

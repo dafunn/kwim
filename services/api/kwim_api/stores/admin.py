@@ -203,12 +203,12 @@ class AdminStore:
 
     async def list_audit(
         self, *, team: str | None = None, operator_id: str | None = None,
-        action: str | None = None, since: Any = None, cursor: int | None = None,
+        action: str | None = None, since: Any = None, before_seq: int | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Cluster-wide audit browse, newest first (`seq DESC`). `cursor` is the
-        prior page's last `seq` - an exclusive upper bound, matching the descending
-        order. Every mutation writes here (`record`); this is the read side."""
+        """Cluster-wide audit browse, newest first (`seq DESC`). `before_seq` is
+        the prior page's last `seq` - an exclusive upper bound, matching the
+        descending order. (Not named `cursor`: that is the connection helper.) Every mutation writes here (`record`); this is the read side."""
         clauses, params = [], []
         if team is not None:
             clauses.append("team = %s")
@@ -222,9 +222,9 @@ class AdminStore:
         if since is not None:
             clauses.append("at >= %s")
             params.append(since)
-        if cursor is not None:
+        if before_seq is not None:
             clauses.append("seq < %s")
-            params.append(cursor)
+            params.append(before_seq)
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         params.append(limit)
         async with cursor(self._pool, row_factory=dict_row) as cur:

@@ -117,7 +117,7 @@ def test_mint_rejects_a_malformed_expiry(store, capsys):
     assert store.keys == [], "nothing is minted when the arguments are rejected"
 
 
-def test_mint_with_no_capabilities_is_read_only(store):
+def test_mint_with_no_capabilities_grants_none(store):
     admin_key.main(["mint", "--team", "acme", "--label", "reader"])
     assert store.keys[0]["capabilities"] == []
 
@@ -188,7 +188,7 @@ def test_import_writes_one_row_per_entry_not_per_team(store, legacy_env):
 
     assert len(store.keys) == 3
     acme = sorted(tuple(k["capabilities"]) for k in store.keys if k["team"] == "acme")
-    assert acme == [("promote",), ("review",)], (
+    assert acme == [("promote", "propose", "read"), ("propose", "read", "review")], (
         "each entry keeps its own grant rather than being unioned or collapsed")
 
 

@@ -14,7 +14,11 @@ key-name/existence only.
 
 - **Deploys** - apply `k8s/` through your reconciler; image tags can be advanced by an
   image-automation controller or by committing tag bumps.
-- **Code graph** - a CronJob (`k8s/codegraph-extract-cronjob.yaml`) extracts each
+- **Which version is running** - `GET /health` reports it as `version`. It comes from the
+  `kwim-v*` release tag at image build time: `0.3.1` is a build of the tagged commit,
+  `0.3.1-4-gabc1234` is 4 commits after that tag at commit `abc1234`, and `dev` means the
+  image was built without `KWIM_VERSION` (see `deployment.md`, step 0).
+- **Code graph** - a CronJob (`k8s/base/codegraph-extract-cronjob.yaml`) extracts each
   configured repo into its own `kwim_<team>_code` graph and distills one
   architecture-summary fact per repo into that team's K/W. Trigger off-schedule by
   creating a Job from the CronJob template.
@@ -93,8 +97,8 @@ kubectl exec <kwim-service-pod> -c kwim-service -- /app/with-secrets.sh \
 ```
 
 - **Mint** - `admin_key mint --team <team> --label <what it is for>` with a
-  repeatable `--capability` (`read`, `propose`, `review`, `promote`; omit for a
-  read-only key). The key is printed once. Only its sha256 is stored, so there is no
+  repeatable `--capability` (`read`, `propose`, `review`, `promote`). A key minted
+  with none can do nothing. The key is printed once. Only its sha256 is stored, so there is no
   lookup later: a lost key is revoked and replaced, never recovered. Treat the
   command's output as secret material and place it in your secret store immediately.
 - **Revoke** - `admin_key revoke --key-prefix <prefix>`. The prefix is the non-secret
@@ -104,8 +108,20 @@ kubectl exec <kwim-service-pod> -c kwim-service -- /app/with-secrets.sh \
   that cache. The revoked key keeps working until the entry expires. If you need it
   dead immediately, restart the service pod.
 - **Capabilities** are carried by each key, so two keys are never told apart by a
-  shared prefix. An unset grant means read-only, never "anyone". Legacy keys still
-  get theirs from the `KWIM_PROMOTE_KEYS` / `KWIM_REVIEW_KEYS` prefix allowlists.
+  shared prefix. A key grants exactly what it carries; an unset grant means none,
+  never "anyone".
+  - `read`: query and search knowledge, read memory (episodic, context, semantic,
+    working), list and check wisdom rules, read proposal status, query the code
+    graph, and list the review queue.
+  - `propose`: propose facts and rules, reaffirm facts, and write memory (episodic,
+    semantic, working).
+  - `review`: approve and reject proposals, and retract committed objects.
+  - `promote`: promote a team rule to the universe graph, and seed rules.
+
+  An agent normally needs `read` and `propose`. The route-by-route table is in
+  `DESIGN.md`, "Team keys". Legacy keys always carry `read` and `propose`, plus
+  `promote` and `review` from the `KWIM_PROMOTE_KEYS` / `KWIM_REVIEW_KEYS` prefix
+  allowlists.
 - **Import legacy keys** - `admin_import_keys` moves `KWIM_API_KEYS` entries into the
   store, one row per entry (never one per team - collapsing them would re-conflate
   the capabilities). Dry-run by default and it mints nothing until `--commit`, so a
@@ -131,7 +147,7 @@ Read it through the console's read API: `GET /v1/admin/audit`, newest first and
 cursor-paginated.
 
 ### Add a repo to the code graph
-Edit `REPOS` in `k8s/codegraph-extract-cronjob.yaml` - `name=owner/repo` pairs,
+Edit `REPOS` in `k8s/base/codegraph-extract-cronjob.yaml` - `name=owner/repo` pairs,
 the name is also the KWIM team the repo distills into (so each repo gets its own
 `kwim_<name>_code` graph and proposes into its own team's K/W). Append `@branch` for a
 non-default branch. Ensure the clone token can read the repo. Deploy, then run a one-off
@@ -141,7 +157,7 @@ extraction to populate immediately.
 Non-secret tunables (gate thresholds, decay half-lives, retrieval/warm-start sizes, the
 code-graph resolution cascade and discovery scope) resolve as env var -> `KWIM_CONFIG`
 file -> shipped `services/api/kwim_api/kwim.defaults.yaml`. Two ways to change one in production:
-- **One key, quick:** set its `KWIM_*` env var in `k8s/kwim-service.yaml` (e.g.
+- **One key, quick:** set its `KWIM_*` env var in `k8s/base/kwim-service.yaml` (e.g.
   `KWIM_GATE_THRESHOLD`, `KWIM_CG_CONF_IMPORT_MAP`) and redeploy. Env wins over both files.
 - **Several keys / keep them together:** ship a YAML file (mounted, e.g. via ConfigMap),
   point `KWIM_CONFIG` at it, and set only the keys you're overriding - it's deep-merged over

@@ -132,7 +132,8 @@ def call_memory_context(monkeypatch):
 
     async def _call(facts):
         monkeypatch.setattr(main_mod, "State", _FakeState(falkor=_FakeFalkor(facts)))
-        team = TeamContext(team="acme", key_id="devkey")
+        team = TeamContext(team="acme", key_id="devkey",
+                           capabilities=frozenset({"read", "propose"}))
         return await _memory_context_handler(session_id="s1", subject="Widget", team=team)
 
     return _call

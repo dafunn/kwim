@@ -38,7 +38,8 @@ data:
   # Space-separated "<name>=<owner/repo>[@<branch>]" pairs. <name> is both the
   # repo's name in the graph and the team it distills into.
   REPOS: "team-a=example-org/repo-a team-b=example-org/repo-b"
-  # Git server host for the clone URL; any host that accepts an oauth2 token.
+  # Git server host for the clone URL; any host that accepts a token as the
+  # password for user oauth2 over HTTPS.
   GIT_BASE: "git.example.com"
 ---
 apiVersion: batch/v1
@@ -65,7 +66,9 @@ spec:
         spec:
           serviceAccountName: kwim-service
           restartPolicy: Never
-          # Add imagePullSecrets here (or via an overlay) if your registry is private.
+          # Pull secret for a private registry. If it does not exist, the kubelet logs a
+          # warning and pulls anonymously, so a public registry needs nothing.
+          imagePullSecrets: [{ name: registry-credentials }]
           volumes:
             - name: cache
               persistentVolumeClaim:
@@ -97,25 +100,35 @@ spec:
                 - -c
                 - |
                   set -e
+                  # The token reaches git through a credential helper that reads it
+                  # from the environment, so it is never written into a cached
+                  # repo's .git/config on the PVC.
+                  export GIT_TERMINAL_PROMPT=0
+                  authgit() {
+                    git -c credential.helper= \
+                        -c credential.helper='!f() { test "$1" = get || exit 0; echo username=oauth2; echo "password=$GIT_TOKEN"; }; f' \
+                        "$@"
+                  }
                   for pair in $REPOS; do
                     name="${pair%%=*}"; spec="${pair#*=}"
                     # spec is "<owner/repo>" or "<owner/repo>@<branch>"
                     repo="${spec%@*}"; branch=""
                     case "$spec" in *@*) branch="${spec##*@}";; esac
-                    url="https://oauth2:${GIT_TOKEN}@${GIT_BASE}/${repo}.git"
+                    url="https://${GIT_BASE}/${repo}.git"
                     dir="/cache/${name}"
                     if [ -d "$dir/.git" ]; then
+                      # Also replaces a URL with an embedded token left by older versions.
                       git -C "$dir" remote set-url origin "$url"
                       if [ -n "$branch" ]; then
-                        git -C "$dir" fetch --depth 1 origin "$branch" && git -C "$dir" reset --hard FETCH_HEAD
+                        authgit -C "$dir" fetch --depth 1 origin "$branch" && git -C "$dir" reset --hard FETCH_HEAD
                       else
-                        git -C "$dir" fetch --depth 1 origin && git -C "$dir" reset --hard origin/HEAD
+                        authgit -C "$dir" fetch --depth 1 origin && git -C "$dir" reset --hard origin/HEAD
                       fi
                     else
                       if [ -n "$branch" ]; then
-                        git clone --depth 1 --branch "$branch" "$url" "$dir"
+                        authgit clone --depth 1 --branch "$branch" "$url" "$dir"
                       else
-                        git clone --depth 1 "$url" "$dir"
+                        authgit clone --depth 1 "$url" "$dir"
                       fi
                     fi
                     echo "fetched $name -> $dir branch=${branch:-default} ($(git -C "$dir" rev-parse --short HEAD))"
