@@ -44,7 +44,7 @@ commits them, rejects them, or routes them to a human.
 
 | Kind | Decision |
 |---|---|
-| fact | evidence check, then an embedding screen: a near-identical fact is rejected as a duplicate, a close one goes to review; a fact close to curated semantic memory also goes to review; anything else commits |
+| fact | evidence check, then an embedding screen: a near-identical fact is rejected as a duplicate, a close one goes to review; a fact close to curated semantic memory also goes to review; a fact from the distiller goes to review (`gate.review_distilled_facts`); anything else commits |
 | advisory | evidence check, then a count of distinct sessions behind the evidence (NELL-style); commits at `gate.auto_commit_threshold` sessions, otherwise review |
 | constraint | always review; enforcement policy is not auto-committed |
 | reinforce | adds evidence to an approved advisory without a new node; commits directly, since it makes no new claim |
@@ -75,6 +75,13 @@ commits them, rejects them, or routes them to a human.
 - **The screen is not the read path.** The gate's duplicate search and the
   agents' semantic search are separate queries. Changing how retrieval matches
   must never change what the gate rejects.
+- **Distilled facts are reviewed.** A fact the distiller proposes
+  (`source_kind: distiller`) that passes the screens goes to review instead of
+  committing, whatever its evidence. The distiller's facts are not yet trusted
+  to commit unseen: it has turned an agent's report of tool output, including a
+  refused request, into a committed fact. `gate.review_distilled_facts: false`
+  (`KWIM_GATE_REVIEW_DISTILLED_FACTS`) restores auto-commit. Distilled advisories
+  keep the session-count rule.
 - **Nothing commits silently.** Every auto-commit is posted for review after the
   fact, with Confirm and Retract buttons. Human-approved commits are not posted
   again.

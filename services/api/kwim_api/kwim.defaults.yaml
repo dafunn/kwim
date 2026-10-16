@@ -10,6 +10,10 @@ gate:
   review_distance: 0.25
   # Kill switch for the verify screen (evidence integrity + embedding dedup).
   verify_enabled: true
+  # Facts the distiller proposes (source_kind "distiller") go to review instead
+  # of auto-committing, until the distiller has been seen working across a
+  # variety of inputs. Other facts are unaffected.
+  review_distilled_facts: true
   # Max chars of a proposal summary echoed into review notifications.
   summary_max: 500
 

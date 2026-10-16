@@ -39,6 +39,14 @@ def _split_well_formed_uuids(ids: list[str]) -> tuple[list[str], list[str]]:
     return well_formed, malformed
 
 
+def _is_distilled_fact(ptype: str, body: dict[str, Any]) -> bool:
+    """A fact from the distiller while gate.review_distilled_facts is on: it goes
+    to review whatever its evidence, since the distiller's facts are not yet
+    trusted to commit unseen."""
+    return (ptype == "fact" and body.get("source_kind") == "distiller"
+            and settings.gate_review_distilled_facts)
+
+
 def summarize_proposal(object_type: str, body: dict[str, Any]) -> str:
     """Human-readable one-liner for a pending proposal (review queue + Mattermost).
 
@@ -129,6 +137,11 @@ class Gate:
         gate_decision: str
         _, gate_decision = self._decide(ptype, body, session_count)
         if gate_decision == "human_approved":
+            if _is_distilled_fact(ptype, body):
+                return await self._route_to_review(
+                    team, pid, ptype, body, proposal,
+                    detail="distilled fact - every fact the distiller proposes is reviewed",
+                )
             return await self._route_to_review(team, pid, ptype, body, proposal)
 
         return await self.commit_proposal(
@@ -661,6 +674,8 @@ class Gate:
         return doc
 
     def _decide(self, ptype: str, body: dict[str, Any], session_count: int = 0) -> tuple[str, str]:
+        if _is_distilled_fact(ptype, body):
+            return "review", "human_approved"          # gate.review_distilled_facts
         if ptype == "fact":
             return "commit", "auto_committed"
         if body.get("rule_type") == "constraint":

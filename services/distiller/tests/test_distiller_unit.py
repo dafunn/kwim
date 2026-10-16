@@ -180,6 +180,52 @@ class TestSelfEventExclusion:
         assert '"ref": 1' in human_content and '"ref": 2' in human_content
 
 
+class TestFailedTurnExclusion:
+    @pytest.mark.asyncio
+    async def test_failed_and_interrupted_turns_are_not_distilled(self, distiller_app, monkeypatch):
+        """A cli_turn whose outcome is not "ok" stays out of the prompt; the
+        watermark still moves past it."""
+        turns = _EVENTS + [
+            {"id": "evt-err", "agent_id": "agent-1", "session_id": "s9", "event_type": "cli_turn",
+             "event_data": {"request": "q", "response": "", "outcome": "error",
+                            "error": "boom from a failed turn"}, "occurred_at": _T2},
+            {"id": "evt-int", "agent_id": "agent-1", "session_id": "s9", "event_type": "cli_turn",
+             "event_data": {"request": "q", "response": "half an answer from an interrupted turn",
+                            "outcome": "interrupted"}, "occurred_at": _T2},
+            {"id": "evt-ok", "agent_id": "agent-1", "session_id": "s9", "event_type": "cli_turn",
+             "event_data": {"request": "q", "response": "an answered turn", "outcome": "ok"},
+             "occurred_at": _T2},
+        ]
+        monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(turns, _NEXT_CURSOR))
+        fake_llm = _FakeLLM("[]")
+        monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: fake_llm)
+        monkeypatch.setattr(distiller_app, "knowledge_propose", AsyncMock())
+        monkeypatch.setattr(distiller_app, "wisdom_propose", AsyncMock())
+        post = AsyncMock(return_value={"event_id": "wm1"})
+        monkeypatch.setattr(distiller_app, "_post", post)
+
+        await distiller_app.run()
+
+        human = fake_llm.calls[0][-1].content
+        assert "boom from a failed turn" not in human
+        assert "half an answer" not in human
+        assert "an answered turn" in human and "trend A recurs" in human
+        post.assert_awaited()   # watermark advanced past the whole window
+
+    @pytest.mark.asyncio
+    async def test_a_window_of_only_failed_turns_proposes_nothing(self, distiller_app, monkeypatch):
+        turns = [{"id": "evt-err", "agent_id": "agent-1", "session_id": "s9", "event_type": "cli_turn",
+                  "event_data": {"request": "q", "response": "", "outcome": "error"}, "occurred_at": _T1}]
+        monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(turns, _NEXT_CURSOR))
+        fake_llm = _FakeLLM("[]")
+        monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: fake_llm)
+        monkeypatch.setattr(distiller_app, "_post", AsyncMock(return_value={"event_id": "wm1"}))
+
+        await distiller_app.run()
+
+        assert fake_llm.calls == []
+
+
 class TestMalformedDistillResponse:
     @pytest.mark.asyncio
     async def test_non_json_response_does_not_advance_watermark(self, distiller_app, monkeypatch):
@@ -496,3 +542,7 @@ class TestRecalledKnowledge:
     def test_system_prompt_names_recalled_knowledge_and_tool_output(self, distiller_app):
         assert "Already in KWIM" in distiller_app._SYSTEM_PROMPT
         assert "tool output" in distiller_app._SYSTEM_PROMPT
+        # A turn reporting its tools' results (a refusal included) is not a fact.
+        assert "A single tool result is not a fact" in distiller_app._SYSTEM_PROMPT
+        assert "refused or denied request" in distiller_app._SYSTEM_PROMPT
+        assert "Treat these as primary evidence" not in distiller_app._SYSTEM_PROMPT

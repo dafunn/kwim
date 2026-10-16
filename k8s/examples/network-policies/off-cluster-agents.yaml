@@ -1,9 +1,23 @@
 # Optional: callers outside the cluster. Agents that reach kwim-service through a
 # NodePort or LoadBalancer arrive from outside every namespace, so
-# kwim-service-ingress-external does not admit them. With the default
-# externalTrafficPolicy (Cluster) the source is rewritten to a node's address, so
-# <agent-cidr> is usually your nodes' network; with Local it is the agents' own
-# addresses. Add this file to the kustomization's resources if you need it.
+# kwim-service-ingress-external does not admit them. Add this file to the
+# kustomization's resources if you need it.
+#
+# The source address the policy sees depends on the external Service's
+# externalTrafficPolicy and on which node the caller connects to:
+#
+# - Cluster (the default). Through the node running kwim-service, the policy
+#   sees the caller's own address. Through any other node, that node forwards
+#   the connection and the policy sees the forwarding node's address on the pod
+#   network, inside the cluster's pod CIDR. Admit both: the callers' addresses
+#   in <agent-cidr> and the pod CIDR in <pod-cidr>. Without <pod-cidr> the
+#   NodePort answers only on whichever node the pod is scheduled to. The pod
+#   CIDR also matches in-cluster pods, so they can reach port 8000 too; KWIM's
+#   API keys still apply.
+# - Local. Only a node running kwim-service answers, and the policy sees the
+#   caller's own address, so delete the <pod-cidr> entry. Callers must reach
+#   that node, for example through a load balancer that health-checks the
+#   nodes.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,5 +29,6 @@ spec:
   ingress:
     - from:
         - ipBlock: { cidr: <agent-cidr> }
+        - ipBlock: { cidr: <pod-cidr> }     # Cluster only; delete for Local
       ports:
         - { port: 8000, protocol: TCP }

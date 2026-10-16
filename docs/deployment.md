@@ -131,7 +131,10 @@ The order matters: each step provisions substrate the next depends on.
      pods as is, and leaves where your PostgreSQL, RabbitMQ, model gateway,
      ingress controller, and git host run as placeholders to fill in. Agents that
      call kwim-service from outside the cluster need `off-cluster-agents.yaml`
-     too.
+     too. With the default `externalTrafficPolicy: Cluster` it must admit the
+     cluster's pod CIDR as well as the agents' addresses, or the NodePort
+     answers only through the node running kwim-service; its header explains
+     the choice between that and `externalTrafficPolicy: Local`.
    - the distiller, which runs as one CronJob per team (step 9)
 7. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
    goes into `promote-keys`, which gates `/wisdom/promote`, `/wisdom/seed`, and review.
@@ -150,6 +153,9 @@ The order matters: each step provisions substrate the next depends on.
    image (step 0), a Secret `distiller-<team>` with `kwim-api-key` (a key for the
    team with `read` and `propose`) and `litellm-key` (a key for your model
    gateway), and `LITELLM_BASE_URL` and `DISTILLER_MODEL` set in the CronJob.
+   Every fact it proposes waits for review (`GET /v1/review/pending`, or the
+   console's Proposals tab) unless you set `KWIM_GATE_REVIEW_DISTILLED_FACTS=false`
+   on kwim-service; see `DESIGN.md`, "Distilled facts are reviewed".
 10. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
 11. **(Optional) the code graph.** Set `REPOS` in `k8s/base/codegraph-extract-cronjob.yaml`
    as `name=owner/repo` pairs where the name is also the team the repo distills into

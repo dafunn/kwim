@@ -57,10 +57,15 @@ claim goes stale:
 When unsure between "slow" and "permanent", prefer "slow".
 
 tool_observation events are raw tool results (e.g. database query results)
-fetched by a research agent. Treat these as primary evidence: look for
-recurring patterns across them (e.g. the same trend/observation showing up in
-multiple tool_observation events) and distill those into facts with the
-appropriate decay_class - current/trending observations should be "fast".
+fetched by a research agent. A pattern that recurs across them (e.g. the same
+trend/observation showing up in multiple tool_observation events) can be
+distilled into a fact with the appropriate decay_class - current/trending
+observations should be "fast". A single tool result is not a fact.
+
+An agent turn that reports what its tools returned - a listing of tables or
+files, log lines, an error, a refused or denied request, what the agent could or
+could not access - is a record of that turn, not knowledge about the domain. Do
+not propose it as a fact or an advisory.
 
 Rules:
 - Cross-episode, not per-episode. Propose something only when multiple episodes
@@ -81,6 +86,14 @@ Rules:
 Respond with only a JSON array (no prose, no markdown fences). Each element is an
 object with a "kind" field of "fact" or "advisory" plus the fields listed above.
 """
+
+
+def _failed_turn(event: dict) -> bool:
+    """An agent turn recorded with an outcome other than "ok" (a cli_turn
+    records "error" and "interrupted"). Events with no outcome are kept."""
+    data = event.get("event_data")
+    outcome = data.get("outcome") if isinstance(data, dict) else None
+    return outcome is not None and outcome != "ok"
 
 
 def _format_events(events: list[dict]) -> tuple[str, dict[int, str]]:
@@ -302,6 +315,11 @@ async def run() -> None:
 
     # Self-event exclusion - never distill the distiller's own bookkeeping.
     events = [e for e in raw_events if e.get("event_type") != WATERMARK_EVENT_TYPE]
+    # A turn that errored or was interrupted is evidence of nothing durable.
+    failed = [e for e in events if _failed_turn(e)]
+    if failed:
+        log.info("distiller: skipping %d failed or interrupted turn(s)", len(failed))
+        events = [e for e in events if not _failed_turn(e)]
 
     proposals_ok = True
     distill_failed = False
@@ -318,7 +336,7 @@ async def run() -> None:
                     proposals_ok = False
                     log.warning("distiller: propose failed for kind=%s - window will be retried", candidate["kind"])
     else:
-        log.info("distiller: window contained only bookkeeping events")
+        log.info("distiller: window contained only bookkeeping events and failed turns")
 
     next_cursor = window.get("next_cursor")
     if distill_failed:

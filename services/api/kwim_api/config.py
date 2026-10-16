@@ -167,6 +167,8 @@ class Settings:
     gate_dup_distance: float = _cfg("gate.dup_distance", "KWIM_GATE_DUP_DIST", float, 0.05)
     gate_review_distance: float = _cfg("gate.review_distance", "KWIM_GATE_REVIEW_DIST", float, 0.25)
     gate_verify_enabled: bool = _cfg_bool("gate.verify_enabled", "KWIM_GATE_VERIFY", True)
+    gate_review_distilled_facts: bool = _cfg_bool(
+        "gate.review_distilled_facts", "KWIM_GATE_REVIEW_DISTILLED_FACTS", True)
     gate_summary_max: int = _cfg("gate.summary_max", "KWIM_GATE_SUMMARY_MAX", int, 500)
 
     # --- Postgres connection pool (one pool each for PostgresStore and AdminStore) ---

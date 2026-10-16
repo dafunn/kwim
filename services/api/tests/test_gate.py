@@ -7,11 +7,16 @@ Covers:
   3. Reinforce path uses deduped-valid count (dedup-and-proceed).
   4. Idempotent re-distill (stable object_id short-circuit).
   5. Regression: constraint -> review, fact-with-no-similar -> commit unchanged.
+     Distilled facts (source_kind "distiller") -> review while
+     gate.review_distilled_facts is on.
   6. retract_object / confirm_object.
 
 Gate tunables (KWIM_GATE_VERIFY / DUP_DIST / REVIEW_DIST) come from conftest's env
 superset.
 """
+import dataclasses
+
+from kwim_api import gate as gate_mod
 from kwim_api.config import settings
 from kwim_api.gate import Gate
 
@@ -498,6 +503,50 @@ def test_decide_regression():
     assert gate._decide("rule", {"rule_type": "advisory"}, threshold) == ("commit", "auto_committed")
     assert gate._decide("rule", {"rule_type": "advisory"}, threshold + 1) == ("commit", "auto_committed")
     assert gate._decide("rule", {"rule_type": "advisory"}) == ("review", "human_approved")  # default sc=0
+
+
+def test_decide_distilled_fact_reviews():
+    gate = Gate(None, None, None)
+    assert gate._decide("fact", {"source_kind": "distiller"}, 999) == ("review", "human_approved")
+    assert gate._decide("fact", {"source_kind": "agent_proposal"}) == ("commit", "auto_committed")
+    assert gate._decide("fact", {"source_kind": "repo_sync"}) == ("commit", "auto_committed")
+    # Distiller advisories keep the session-count rule.
+    threshold = settings.gate_auto_commit_threshold
+    assert gate._decide("rule", {"rule_type": "advisory", "source_kind": "distiller"},
+                        threshold) == ("commit", "auto_committed")
+
+
+def test_decide_distilled_fact_commits_with_the_switch_off(monkeypatch):
+    monkeypatch.setattr(gate_mod, "settings",
+                        dataclasses.replace(settings, gate_review_distilled_facts=False))
+    gate = Gate(None, None, None)
+    assert gate._decide("fact", {"source_kind": "distiller"}) == ("commit", "auto_committed")
+
+
+async def test_distilled_fact_clear_of_the_screen_goes_to_review():
+    # Nothing similar and evidence from three sessions: an agent's fact would
+    # commit; the distiller's waits for a reviewer, with the reason.
+    pg = _FakePg({EV1: "s1", EV2: "s2", EV3: "s3"})
+    falkor = _FakeFalkor()
+    doc = await _make_gate(pg=pg, falkor=falkor, embedder=_FakeEmbedder()).handle(
+        _proposal(pid="p-dist", proposed_by="distiller-key",
+                  body={"statement": "The orders schema has four tables.", "fact_type": "slow",
+                        "evidence": [EV1, EV2, EV3], "source_kind": "distiller"}))
+    assert doc["status"] == "pending_review"
+    assert "distilled fact" in doc["detail"]
+    assert falkor.materialized_facts == []
+    assert [r["proposal_id"] for r in pg.pending_inserted] == ["p-dist"]
+
+
+async def test_agent_fact_clear_of_the_screen_still_commits():
+    pg = _FakePg({EV1: "s1"})
+    falkor = _FakeFalkor()
+    doc = await _make_gate(pg=pg, falkor=falkor, embedder=_FakeEmbedder()).handle(
+        _proposal(pid="p-agent",
+                  body={"statement": "The orders schema has four tables.", "fact_type": "slow",
+                        "evidence": [EV1], "source_kind": "agent_proposal"}))
+    assert doc["status"] == "committed"
+    assert len(falkor.materialized_facts) == 1
 
 
 # ---------------------------------------------------------------------------
