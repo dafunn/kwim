@@ -22,7 +22,7 @@ def _parse(text: str) -> ParsedSkill:
     try:
         return parse_skill(text)
     except SkillFormatError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"SKILL.md {exc}")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"SKILL.md {exc}")
 
 
 def _embed_text(name: str, description: str, body: str) -> str:
@@ -100,7 +100,7 @@ async def revise(pg: Any, embedder: Any, team: str, name: str, text: str, *, by:
     skill = await _get_or_404(pg, team, name)
     parsed = _parse(text)
     if parsed.name != name:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"the text names {parsed.name!r}, not {name!r}; "
                                    "a revision keeps the skill's name")
     version = await _version(parsed, text, embedder, source="human", author=by, approver=by)
@@ -140,7 +140,7 @@ async def propose(pg: Any, falkor: Any, gate: Any, team: str, text: str, *,
     if supersedes:
         current = await _get_or_404(pg, target, supersedes)
         if parsed.name != supersedes:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail=f"the text names {parsed.name!r}, not {supersedes!r}; "
                                        "a revision keeps the skill's name")
         if current["status"] != "current":
@@ -148,7 +148,7 @@ async def propose(pg: Any, falkor: Any, gate: Any, team: str, text: str, *,
                                 detail=f"skill {supersedes!r} is retired")
     else:
         if scope == "universe":
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="a new skill is proposed to the team; the universe "
                                        "takes revisions and promotions")
         if await pg.get_skill(target, parsed.name) is not None:

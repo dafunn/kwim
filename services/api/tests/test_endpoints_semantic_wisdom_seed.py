@@ -2,11 +2,14 @@
   - GET /v1/memory/semantic  (optional q, meta.* filters)
   - POST /v1/memory/semantic (explicit semantic write)
   - POST /v1/wisdom/seed     (operator-gated direct commit)
+  - POST /v1/wisdom/promote/{rule_id}  (provenance timestamp)
 
 Auth keys/promote allowlist come from conftest's env superset:
   devkey -> acme (key_id "devkey", not a promote key)
   promoter -> acme (key_id "promot", is a promote key)
 """
+import datetime
+import re
 from typing import Any
 
 import pytest
@@ -45,6 +48,17 @@ class _FakeFalkor:
         assert "commit_seq" in rule, f"materialize_rule missing commit_seq in {rule.keys()}"
         self.calls.append(("materialize_rule", team, rule, provenance))
         self.rules.append(rule)
+
+    async def query_rules(self, team: str, situation: dict | None = None, limit: int = 20) -> list[dict]:
+        self.calls.append(("query_rules", team, limit))
+        return [{**r} for r in self.rules]
+
+    async def get_rule(self, team: str, rule_id: str) -> dict | None:
+        self.calls.append(("get_rule", team, rule_id))
+        return next((r for r in self.rules if r["id"] == rule_id), None)
+
+    async def tag_rule_promoted(self, team: str, rule_id: str) -> None:
+        self.calls.append(("tag_rule_promoted", team, rule_id))
 
     async def append_commit(self, team: str, record: dict) -> int:
         # Enforce hard keys the real append_commit requires
@@ -228,3 +242,57 @@ def test_wisdom_seed_with_promote_key(wired):
     assert isinstance(seeded["commit_seq"], int)
     # regression guard: pg.append_commit got gate_decision.
     assert wired.pg.calls[-1][2].get("gate_decision") == "human_approved"
+
+
+# ---------------------------------------------------------------------------
+# Provenance timestamps (seeded_at, promoted_at)
+# ---------------------------------------------------------------------------
+
+# UTC ISO 8601 with a `Z` suffix: 2026-10-29T14:03:12.345678Z. isoformat() omits
+# the fraction when microsecond is 0.
+_UTC_Z_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{6})?Z")
+
+
+def _assert_utc_z_now(value: str, before: datetime.datetime, after: datetime.datetime) -> None:
+    """`value` has the `Z` format and is a UTC time taken during the request."""
+    assert _UTC_Z_TIMESTAMP.fullmatch(value), f"timestamp {value!r} is not YYYY-MM-DDTHH:MM:SS[.ffffff]Z"
+    parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert before.replace(microsecond=0) <= parsed <= after, (
+        f"timestamp {value!r} is not the UTC time of the request ({before} .. {after})")
+
+
+def test_wisdom_seed_seeded_at_is_utc_z(wired):
+    before = datetime.datetime.now(datetime.UTC)
+    r = wired.client.post(
+        "/v1/wisdom/seed",
+        json={"id": "rule-1", "rule_type": "constraint", "action_pattern": "test",
+              "verdict": "block", "authority": "project", "severity": "high", "check_tier": "output"},
+        headers={"Authorization": "Bearer promoter"},
+    )
+    after = datetime.datetime.now(datetime.UTC)
+    assert r.status_code == 201
+
+    committed = wired.pg.calls[-1][2]["provenance"]
+    materialized = wired.falkor.calls[-1][3]
+    assert committed == materialized
+    assert set(committed) == {"seeded_by", "seeded_at"}
+    _assert_utc_z_now(committed["seeded_at"], before, after)
+
+
+def test_wisdom_promote_promoted_at_is_utc_z(wired):
+    wired.falkor.rules = [{
+        "id": "rule-1", "_source": "team", "status": "approved", "rule_type": "constraint",
+        "action_pattern": "test", "verdict": "block", "authority": "project",
+        "severity": "high", "check_tier": "output", "evidence_count": 3,
+    }]
+    before = datetime.datetime.now(datetime.UTC)
+    r = wired.client.post("/v1/wisdom/promote/rule-1", headers={"Authorization": "Bearer promoter"})
+    after = datetime.datetime.now(datetime.UTC)
+    assert r.status_code == 200
+    assert r.json()["status"] == "promoted"
+
+    committed = wired.pg.calls[-1][2]["provenance"]
+    materialize = next(c for c in wired.falkor.calls if c[0] == "materialize_rule")
+    assert committed == materialize[3]
+    assert committed["promoted_by"] == "promot"
+    _assert_utc_z_now(committed["promoted_at"], before, after)

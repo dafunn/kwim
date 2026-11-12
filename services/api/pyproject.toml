@@ -38,6 +38,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-timeout==2.4.0",
+    "httpx2==2.16.0",                      # starlette.testclient transport
     "ruff==0.17.0",                        # lint; config in ruff.toml at the repo root
     "reportlab==5.0.1",                    # builds PDF fixtures in the document tests
 ]

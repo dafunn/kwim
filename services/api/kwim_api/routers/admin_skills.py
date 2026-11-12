@@ -59,7 +59,7 @@ def _version_out(v: dict[str, Any], *, text: bool) -> dict[str, Any]:
 async def _check_owner(owner: str) -> None:
     row = await State.admin.get_operator_by_username(owner)
     if row is None or not row["is_active"]:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"owner {owner!r} is not an active operator")
 
 

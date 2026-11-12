@@ -52,19 +52,19 @@ async def memory_episodic_window(
     `order=desc`; omit both to read from the start or end."""
     require_capability(team, "read")
     if (since_ts is None) != (since_id is None):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                              detail="since_ts and since_id must be provided together")
     if limit < 1 or limit > _EPISODIC_MAX_LIMIT:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                              detail=f"limit must be between 1 and {_EPISODIC_MAX_LIMIT}")
     if order not in ("asc", "desc"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                              detail=f"order must be 'asc' or 'desc', got {order!r}")
     if since_ts is not None:
         try:
             parsed_ts = datetime.datetime.fromisoformat(since_ts)
         except ValueError:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                  detail=f"since_ts is not a valid ISO8601 timestamp: {since_ts!r}")
     else:
         parsed_ts = None

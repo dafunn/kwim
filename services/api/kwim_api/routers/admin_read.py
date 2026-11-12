@@ -28,7 +28,7 @@ async def _team_path(team: str, _op: AdminContext = CurrentOperator) -> str:
     """Validate the team in the path after authenticating the operator (`_op`),
     so an unauthenticated caller gets 401 before any 404 or 422."""
     if not _IDENT.match(team):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="invalid team identifier")
     schemas = await State.pg.list_team_schemas()
     if team in schemas or await State.admin.get_team(team) is not None:
@@ -247,28 +247,28 @@ async def admin_episodic(
     since_ts/since_id pair), and the list envelope."""
     if cursor is not None:
         if since_ts is not None or since_id is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="pass cursor or since_ts/since_id, not both")
         decoded = decode_cursor(cursor)
         since_ts, since_id = decoded.get("ts"), decoded.get("id")
         if since_ts is None or since_id is None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="malformed cursor")
     if (since_ts is None) != (since_id is None):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="since_ts and since_id must be provided together")
     if order not in ("asc", "desc"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"order must be 'asc' or 'desc', got {order!r}")
     if archived not in ("false", "true", "any"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"archived must be 'false', 'true', or 'any', got {archived!r}")
     parsed_ts = None
     if since_ts is not None:
         try:
             parsed_ts = datetime.datetime.fromisoformat(since_ts)
         except ValueError:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail=f"since_ts is not a valid ISO8601 timestamp: {since_ts!r}")
 
     rows = await State.pg.read_episodic(
@@ -289,7 +289,7 @@ async def admin_episodic(
 async def admin_working(team: str = TeamPath, session: str = "",
                         _op: AdminContext = CurrentOperator):
     if not session:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="session is required")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="session is required")
     return {"items": await State.falkor.working_list(team, session)}
 
 
@@ -308,12 +308,12 @@ async def admin_commit_log(
     """Takes an opaque `cursor` or a raw `since_seq`."""
     if cursor is not None:
         if since_seq is not None:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="pass cursor or since_seq, not both")
         decoded = decode_cursor(cursor)
         since_seq = decoded.get("seq")
         if not isinstance(since_seq, int):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="malformed cursor")
     filters = {"object_id": object_id, "object_type": object_type, "operation": operation,
               "source_kind": source_kind, "gate_decision": gate_decision}
@@ -345,7 +345,7 @@ async def admin_proposals(
             decoded = {"created_at": datetime.datetime.fromisoformat(raw["created_at"]),
                       "id": raw["id"]}
         except (KeyError, TypeError, ValueError):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="malformed cursor")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="malformed cursor")
 
     rows = await State.pg.list_proposals(team, resolved=resolved, resolution=resolution,
                                          object_type=object_type, source_kind=source_kind,
@@ -399,7 +399,7 @@ async def admin_code_trace(
     min_confidence: float = 0.0, _op: AdminContext = CurrentOperator,
 ):
     if direction not in ("outbound", "inbound"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="direction must be 'outbound' or 'inbound'")
     rows = await State.falkor.code_trace_calls(team, fn_id=fn_id, direction=direction,
                                                depth=depth, min_confidence=min_confidence)
@@ -452,7 +452,7 @@ async def admin_audit(
         try:
             parsed_since = datetime.datetime.fromisoformat(since)
         except ValueError:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail=f"since is not a valid ISO8601 timestamp: {since!r}")
     decoded_seq = None
     if cursor:
@@ -460,7 +460,7 @@ async def admin_audit(
         try:
             decoded_seq = int(raw["seq"])
         except (KeyError, TypeError, ValueError):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="malformed cursor")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail="malformed cursor")
 
     rows = await State.admin.list_audit(team=team, operator_id=operator, action=action,
                                         since=parsed_since, before_seq=decoded_seq, limit=limit)

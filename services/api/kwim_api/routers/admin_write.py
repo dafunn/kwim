@@ -153,7 +153,7 @@ def _amend_result(result: dict, operator: AdminContext) -> dict:
             status.HTTP_409_CONFLICT,
             detail=f"object is not current (status={result.get('object_status')})")
     if result["status"] == "invalid_field":
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=result.get("detail", "invalid field"))
     return {"object_id": result["object_id"], "seq": result["seq"],
             "operation": "amend"}
@@ -367,7 +367,7 @@ async def _resolve_forget_plan(team: str, selection: dict) -> list[dict]:
                 status=sel.get("status"),
                 statement_contains=sel.get("statement_contains"))
     if not ids:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="no object_ids or select filters provided")
     return await plan_forget(State.falkor, team, ids, force_shared=False)
 
@@ -518,7 +518,7 @@ async def admin_bulk_reject(team: str, body: BulkRejectRequest,
                 older_than = datetime.fromisoformat(body.older_than)
             except ValueError:
                 raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"older_than is not a valid ISO 8601 timestamp: "
                            f"{body.older_than!r}") from None
 

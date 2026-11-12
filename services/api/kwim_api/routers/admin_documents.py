@@ -154,7 +154,7 @@ async def admin_upload_document(
         _check_declared_size(request)
         doc_title = (title or filename or "").strip()
         if not doc_title:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 detail="title or filename is required")
         job_id = await _start_job(team, operator, {"filename": filename})
         sha256, size = await _receive(request, team, job_id)

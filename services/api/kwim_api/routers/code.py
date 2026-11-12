@@ -59,7 +59,7 @@ async def code_trace(
     Filter out low-trust edges with min_confidence."""
     require_capability(team, "read")
     if direction not in ("outbound", "inbound"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                              detail="direction must be 'outbound' or 'inbound'")
     rows = await State.falkor.code_trace_calls(
         team.team, fn_id=fn_id, direction=direction, depth=depth, min_confidence=min_confidence)

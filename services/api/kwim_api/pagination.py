@@ -20,10 +20,10 @@ def decode_cursor(cursor: str) -> dict[str, Any]:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
         values = json.loads(raw)
     except Exception:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="malformed cursor") from None
     if not isinstance(values, dict):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="malformed cursor")
     return values
 

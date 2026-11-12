@@ -75,11 +75,11 @@ async def admin_create_team(body: TeamCreateRequest, operator: AdminContext = Cu
     team = body.team
     if team == "universe":
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="'universe' is the cluster-wide shared schema, provisioned once - "
                    "not a team")
     if not _IDENT.match(team) or team in _RESERVED_TEAM_NAMES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"invalid or reserved team identifier: {team!r}")
 
     async with audited(operator, "team.create", team,
@@ -112,7 +112,7 @@ async def admin_create_team(body: TeamCreateRequest, operator: AdminContext = Cu
 @router.post("/teams/{team}/adopt")
 async def admin_adopt_team(team: str, operator: AdminContext = CurrentOperator):
     if not _IDENT.match(team):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail="invalid team identifier")
 
     async with audited(operator, "team.adopt", team):
@@ -240,7 +240,7 @@ async def admin_mint_key(body: KeyMintRequest, team: str = TeamPath,
                          operator: AdminContext = CurrentOperator):
     unknown = sorted(set(body.capabilities) - set(CAPABILITIES))
     if unknown:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             detail=f"unknown capability value(s): {unknown}")
 
     capabilities = sorted(set(body.capabilities))

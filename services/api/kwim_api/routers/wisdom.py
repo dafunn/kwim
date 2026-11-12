@@ -133,7 +133,7 @@ async def wisdom_promote(rule_id: str, team: TeamContext = CurrentTeam):
                             detail=f"rule {rule_id} not found in team graph query results")
 
     universe_id = str(uuid.uuid4())
-    promoted_at = datetime.datetime.utcnow().isoformat() + "Z"
+    promoted_at = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
     provenance = {
         "proposed_by": team.key_id,          # the promoting human's key-id handle
         "promoted_from_team": team.team,
@@ -194,7 +194,7 @@ async def wisdom_seed(body: SeedRule, team: TeamContext = CurrentTeam):
 
     payload = body.model_dump()
     provenance = {"seeded_by": team.key_id,
-                  "seeded_at": datetime.datetime.utcnow().isoformat() + "Z"}
+                  "seeded_at": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")}
     seq = await State.pg.append_commit(team.team, {
         "object_type": "rule", "object_id": body.id, "operation": "commit",
         "payload": payload, "provenance": provenance,
