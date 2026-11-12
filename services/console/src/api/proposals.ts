@@ -3,7 +3,7 @@ import type { ListEnvelope } from "./pagination";
 
 export interface Proposal {
   proposal_id: string;
-  object_type: "fact" | "rule";
+  object_type: "fact" | "rule" | "skill";
   proposed_by: string | null;
   created_at: string;
   summary: string;

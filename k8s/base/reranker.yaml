@@ -1,0 +1,84 @@
+---
+# Reranker: TEI on CPU serving the cross-encoder ms-marco-MiniLM-L6-v2 on
+# /rerank, which reorders document search candidates. Model in the image, no
+# Hugging Face Hub access.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reranker
+  namespace: kwim
+  labels:
+    app: reranker
+    app.kubernetes.io/name: reranker
+    app.kubernetes.io/part-of: kwim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reranker
+  template:
+    metadata:
+      labels:
+        app: reranker
+        app.kubernetes.io/name: reranker
+        app.kubernetes.io/part-of: kwim
+    spec:
+      # Pull secret for a private registry. If it does not exist, the kubelet logs a
+      # warning and pulls anonymously, so a public registry needs nothing.
+      imagePullSecrets: [{ name: registry-credentials }]
+      containers:
+        - name: reranker
+          # Bare image name; set registry + tag via the `images:` transformer in your overlay.
+          image: kwim-reranker:latest
+          args:
+            - --model-id
+            - /models/ms-marco-MiniLM-L6-v2
+            - --auto-truncate
+          env:
+            - { name: HF_HUB_OFFLINE, value: "1" }
+            # OTLP endpoint for TEI's gRPC exporter (needs the http:// scheme); unset
+            # by default.
+            - { name: OTLP_ENDPOINT, value: "" }
+            - { name: OTLP_SERVICE_NAME, value: "kwim-reranker" }
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          # No CPU limit: under a CFS quota ONNX Runtime still sizes its thread pool
+          # from the node's cores and runs about 4x slower.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reranker
+  namespace: kwim
+  labels:
+    app: reranker
+    app.kubernetes.io/name: reranker
+    app.kubernetes.io/part-of: kwim
+spec:
+  type: ClusterIP
+  selector:
+    app: reranker
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

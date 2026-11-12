@@ -50,10 +50,14 @@ def _is_distilled_fact(ptype: str, body: dict[str, Any]) -> bool:
 def summarize_proposal(object_type: str, body: dict[str, Any]) -> str:
     """Human-readable one-liner for a pending proposal (review queue + Mattermost).
 
-    fact -> statement, advisory -> approach, constraint -> action_pattern + verdict.
-    Truncated to _SUMMARY_MAX chars.
+    fact -> statement, advisory -> approach, constraint -> action_pattern + verdict,
+    skill -> name, owner and description. Truncated to _SUMMARY_MAX chars.
     """
-    if object_type == "fact":
+    if object_type == "skill":
+        kind = "revision of" if body.get("supersedes") else "new skill"
+        text = (f"{kind} {body.get('name', '')} (owner: {body.get('owner') or 'none'}): "
+                f"{body.get('description', '')}")
+    elif object_type == "fact":
         text = str(body.get("statement", ""))
     elif body.get("rule_type") == "constraint":
         text = f"{body.get('action_pattern', '')} -> {body.get('verdict', '')}"
@@ -279,8 +283,19 @@ class Gate:
 
         Used by auto-commit and by human approval. `extra_provenance` is merged in
         without overriding the proposer's attribution. A fact without `embedding`
-        is embedded here.
+        is embedded here. A skill is committed by the skills service.
         """
+        if ptype == "skill":
+            from .runtime import State
+            from .skills.service import commit_proposal as commit_skill
+            result = await commit_skill(self._pg, State.docs_embedder, team, pid, body,
+                                        proposal.get("proposed_by"), extra_provenance or {})
+            doc = {"id": pid, "object_type": "skill", "status": "committed",
+                   "detail": f"object_id={result['object_id']} seq={result['seq']} "
+                             f"version={result['version']}",
+                   "object_id": result["object_id"], "seq": result["seq"]}
+            await self._falkor.proposal_set(pid, doc)
+            return doc
         object_id = body.get("object_id") or str(uuid.uuid4())
         payload, provenance = self._split(ptype, body, proposal)
         if ptype == "fact" and embedding is None:

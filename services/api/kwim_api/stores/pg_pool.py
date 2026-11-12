@@ -2,6 +2,7 @@
 
 Each connection is checked on checkout; one the server dropped is replaced.
 """
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -38,3 +39,13 @@ async def cursor(pool: AsyncConnectionPool, row_factory: AsyncRowFactory | None 
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=row_factory) as cur:
             yield cur
+
+
+def is_uuid(value: str) -> bool:
+    """Whether `value` parses as a UUID. Ids from a URL are checked before they
+    reach a uuid column, where a malformed one is an error rather than no match."""
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return True

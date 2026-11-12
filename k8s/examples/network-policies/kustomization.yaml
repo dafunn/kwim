@@ -10,6 +10,8 @@
 #                          controller, and the git host; needs your values
 # off-cluster-agents.yaml  optional, not listed below: agents that call
 #                          kwim-service through a NodePort or LoadBalancer
+# review-surface.yaml      optional, not listed below: kwim-service's posts to
+#                          the Mattermost webhook (deployment.md step 12)
 #
 # Some network plugins also apply policies to the kubelet's health checks. If
 # pods go unready after applying these, allow your nodes' network as an ingress

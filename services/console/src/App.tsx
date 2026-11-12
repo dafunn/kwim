@@ -10,6 +10,8 @@ import { Jobs } from "./routes/console/Jobs";
 import { Operators } from "./routes/console/Operators";
 import { CommitLog } from "./routes/team/CommitLog";
 import { Code } from "./routes/team/Code";
+import { Documents } from "./routes/team/Documents";
+import { Skills } from "./routes/team/Skills";
 import { Keys } from "./routes/team/Keys";
 import { Knowledge } from "./routes/team/Knowledge";
 import { Memory } from "./routes/team/Memory";
@@ -41,6 +43,8 @@ export function App() {
             <Route path="commit-log" element={<CommitLog />} />
             <Route path="proposals" element={<Proposals />} />
             <Route path="code" element={<Code />} />
+            <Route path="documents" element={<Documents />} />
+            <Route path="skills" element={<Skills />} />
             <Route path="keys" element={<Keys />} />
           </Route>
           <Route path="/console" element={<ConsoleLayout />}>

@@ -10,7 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from .pg_pool import cursor, open_pool
+from .pg_pool import cursor, is_uuid, open_pool
 
 log = logging.getLogger(__name__)
 
@@ -326,7 +326,9 @@ class AdminStore:
             return await cur.fetchone()
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        """Fetch one job row by id."""
+        """Fetch one job row by id; None for an unknown or malformed id."""
+        if not is_uuid(job_id):
+            return None
         async with cursor(self._pool, row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, kind, team, status, started_at, finished_at, operator_id, detail "

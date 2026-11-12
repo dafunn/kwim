@@ -3,6 +3,7 @@ one audit row (`audited`). Team-scoped routes resolve the team through TeamPath;
 create and adopt do not. See docs/DESIGN.md, "Provisioning teams" and "Preview
 and confirm in the console".
 """
+import asyncio
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from ..admin_auth import AdminContext, CurrentOperator
 from ..admin_key import CAPABILITIES
 from ..auth import invalidate_key_cache
 from ..config import settings
+from ..documents import ingest
 from ..keys import generate_key
 from ..models import (
     KeyMintRequest,
@@ -160,6 +162,7 @@ async def admin_destroy_preview(team: str = TeamPath, operator: AdminContext = C
         episodic = await State.pg.count_episodic(team)
         commit_rows = await State.pg.count_commit_log(team)
         pending = (await State.pg.pending_stats(team))["count"]
+        documents = await State.pg.count_documents(team)
         preflight = await State.pg.destroy_team_preflight(team)
 
         token = secrets.token_urlsafe(32)
@@ -171,8 +174,12 @@ async def admin_destroy_preview(team: str = TeamPath, operator: AdminContext = C
             "preview_token": token,
             "expires_at": expires_at.isoformat(),
             "counts": {"facts": facts, "rules": rules, "semantic": semantic,
-                      "episodic": episodic, "commit_rows": commit_rows, "pending": pending},
-            "objects": {"schema": team, "graphs": [f"kwim_{team}", f"kwim_{team}_code"]},
+                      "episodic": episodic, "commit_rows": commit_rows, "pending": pending,
+                      "documents": documents["documents"],
+                      "document_bytes": documents["bytes"]},
+            "objects": {"schema": team, "graphs": [f"kwim_{team}", f"kwim_{team}_code",
+                                                   f"kwim_{team}_docs"],
+                        "files": f"{settings.documents_storage_path}/{team}"},
             "preflight": preflight,
         }
 
@@ -212,8 +219,10 @@ async def admin_destroy_team(body: TeamDestroyRequest, team: str = TeamPath,
         dropped_graphs = await State.falkor.drop_team_graphs(team)
         await State.pg.drop_team_schema(team)
         await State.admin.delete_team_record(team)
+        files = await asyncio.to_thread(ingest.storage().delete_team, team)
 
-        return {"team": team, "dropped": {"schema": team, "graphs": sorted(dropped_graphs)}}
+        return {"team": team, "dropped": {"schema": team, "graphs": sorted(dropped_graphs),
+                                          "files": files}}
 
 
 # ---------------------------------------------------------------------------

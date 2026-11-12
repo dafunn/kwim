@@ -90,6 +90,9 @@ _SKIP_DIRS = frozenset(_cfg_list(
     "codegraph.discovery.skip_dirs", "KWIM_CG_SKIP_DIRS",
     [".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules",
      ".mypy_cache", ".ruff_cache", "dist", "build", ".tox", "tests", "test"]))
+_DOCUMENT_TYPES = tuple(_cfg_list(
+    "documents.allowed_types", "KWIM_DOCUMENTS_ALLOWED_TYPES",
+    ["application/pdf", "text/markdown"]))
 _IGNORE_FILES = tuple(_cfg_list(
     "codegraph.discovery.ignore_files", "KWIM_CG_IGNORE_FILES",
     [".gitignore", ".cgignore"]))
@@ -197,6 +200,54 @@ class Settings:
 
     # --- Rebuild ---
     embed_batch: int = _cfg("rebuild.embed_batch", "KWIM_EMBED_BATCH", int, 32)
+    # An admin rebuild job running longer than this is cancelled and marked failed.
+    rebuild_timeout_s: float = _cfg("rebuild.timeout_s", "KWIM_REBUILD_TIMEOUT_S", float, 1800)
+
+    # --- Documents (uploaded manuals and references) ---
+    documents_storage_path: str = _cfg(
+        "documents.storage_path", "KWIM_DOCUMENTS_PATH", str, "/data/documents")
+    documents_max_upload_mb: int = _cfg(
+        "documents.max_upload_mb", "KWIM_DOCUMENTS_MAX_UPLOAD_MB", int, 100)
+    documents_max_revisions: int = _cfg(
+        "documents.max_revisions", "KWIM_DOCUMENTS_MAX_REVISIONS", int, 50)
+    documents_allowed_types: tuple = _DOCUMENT_TYPES
+    # Chunk sizes are in estimated tokens: characters / documents_chars_per_token.
+    documents_chunk_target_tokens: int = _cfg(
+        "documents.chunk_target_tokens", "KWIM_DOCUMENTS_CHUNK_TARGET_TOKENS", int, 300)
+    documents_chunk_max_tokens: int = _cfg(
+        "documents.chunk_max_tokens", "KWIM_DOCUMENTS_CHUNK_MAX_TOKENS", int, 400)
+    documents_chars_per_token: float = _cfg(
+        "documents.chars_per_token", "KWIM_DOCUMENTS_CHARS_PER_TOKEN", float, 3.5)
+    # The document embedder; separate from the facts embedder and its dimension.
+    documents_embedder_url: str = os.environ.get("KWIM_DOCS_EMBEDDER_URL", "")
+    documents_embed_dim: int = _cfg(
+        "documents.embedder.dim", "KWIM_DOCS_EMBED_DIM", int, 384)
+    documents_embed_timeout_s: float = _cfg(
+        "documents.embedder.timeout_s", "KWIM_DOCS_EMBED_TIMEOUT", float, 60.0)
+    documents_embedder_max_batch: int = _cfg(
+        "documents.embedder.max_batch", "KWIM_DOCS_EMBEDDER_MAX_BATCH", int, 32)
+    # The reranker (TEI /rerank); unset means results keep their fused order.
+    documents_reranker_url: str = os.environ.get("KWIM_DOCS_RERANKER_URL", "")
+    documents_reranker_candidates: int = _cfg(
+        "documents.reranker.candidates", "KWIM_DOCS_RERANKER_CANDIDATES", int, 40)
+    documents_reranker_max_batch: int = _cfg(
+        "documents.reranker.max_batch", "KWIM_DOCS_RERANKER_MAX_BATCH", int, 32)
+    documents_reranker_timeout_s: float = _cfg(
+        "documents.reranker.timeout_s", "KWIM_DOCS_RERANKER_TIMEOUT", float, 30.0)
+    documents_search_vector_k: int = _cfg(
+        "documents.search.vector_k", "KWIM_DOCS_SEARCH_VECTOR_K", int, 50)
+    documents_search_fulltext_k: int = _cfg(
+        "documents.search.fulltext_k", "KWIM_DOCS_SEARCH_FULLTEXT_K", int, 50)
+    documents_search_rrf_k: int = _cfg(
+        "documents.search.rrf_k", "KWIM_DOCS_SEARCH_RRF_K", int, 60)
+    documents_search_max_section_tokens: int = _cfg(
+        "documents.search.max_section_tokens", "KWIM_DOCS_SEARCH_MAX_SECTION_TOKENS", int, 2000)
+
+    # --- Skills ---
+    skills_max_chars: int = _cfg("skills.max_chars", "KWIM_SKILLS_MAX_CHARS", int, 8192)
+    skills_search_limit: int = _cfg("skills.search.limit", "KWIM_SKILLS_SEARCH_LIMIT", int, 5)
+    skills_search_min_similarity: float = _cfg(
+        "skills.search.min_similarity", "KWIM_SKILLS_SEARCH_MIN_SIMILARITY", float, 0.55)
 
     # --- Messaging / graph names ---
     rmq_exchange: str = _cfg("messaging.rmq_exchange", "KWIM_RMQ_EXCHANGE", str, "kwim")

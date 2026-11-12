@@ -61,8 +61,25 @@ spec:
       ports:
         - { port: 80, protocol: TCP }
 ---
-# kwim-service reaches FalkorDB and the embedder; its external egress is in
-# external.yaml.
+# The document embedder and the reranker answer kwim-service only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docs-models-ingress
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [docs-embedder, reranker] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: kwim-service }
+      ports:
+        - { port: 80, protocol: TCP }
+---
+# kwim-service reaches FalkorDB, the embedder, the document embedder and the
+# reranker; its external egress is in external.yaml.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -80,6 +97,10 @@ spec:
     - to:
         - podSelector:
             matchLabels: { app: embedder }
+        - podSelector:
+            matchLabels: { app: docs-embedder }
+        - podSelector:
+            matchLabels: { app: reranker }
       ports:
         - { port: 80, protocol: TCP }
 ---

@@ -34,7 +34,11 @@ The pieces:
   already knows what it is looking for, and by semantic search when it does not.
   Facts arrive from two sources: agents proposing what they learned, and an
   extractor that reads your repositories into a code graph and proposes what it
-  finds there. See "Knowledge from code" below.
+  finds there. See "Knowledge from code" below. Longer reference material -
+  manuals and technical references - is held as documents, searched by section.
+  See "Documents" below.
+- **Skills** - task instructions agents search for on each turn and load when a
+  task calls for them, governed and versioned like the rest. See "Skills" below.
 - **Wisdom** - advice as hints ("when X, do Y") and rules as hard constraints ("never run Z").
 - **Intelligence** - the model gateway, handles routing and accounting, where usage 
   and cost can be tracked per team or per agent
@@ -103,6 +107,48 @@ source of truth is the repositories themselves, so it is refreshed by re-running
 the extractor, and a rebuild deliberately leaves it alone. It is based on
 Codebase-Memory from this arXiv paper: https://arxiv.org/abs/2603.27277
 
+## Documents
+
+Operators upload manuals and references - PDFs with a text layer, or Markdown,
+up to 100 MB by default - through the admin console. KWIM extracts each
+document's structure (sections, numbered steps, tables, warnings, and figures),
+splits it into chunks along that structure, and indexes the chunks in a
+documents graph per team. Agents search in plain language or with exact strings
+such as part numbers: vector and full-text results are fused, optionally
+rescored by a cross-encoder reranker, and each hit is expanded to the section
+that contains it. An agent gets a whole procedure with its warnings and figures,
+not a fragment.
+
+A document is one governed object. Uploads, new revisions, retractions, and
+promotions are commit-log rows; the chunks are derived data. The original files
+sit on a volume, addressed by content hash, and the extracted structure is kept
+in Postgres, so the documents graph can be rebuilt from Postgres alone. Scanned
+PDFs (OCR) and descriptions of diagrams are not supported yet.
+
+## Skills
+
+A skill is a named set of task instructions, a `SKILL.md` with frontmatter, that
+an agent loads when a task calls for it: for example, which playbook reports a
+host's disk usage and how to run it. A skill refers to the scripts and playbooks
+it uses by repository and path; those stay in git, and KWIM holds only the
+instructions. A skill is a single `SKILL.md`: other files in a skill's directory
+are not imported or stored. Skills made of several files are not supported in
+this release.
+
+On each turn an agent searches skills with the turn's request, gets back names
+and descriptions ranked by similarity, and loads the one it follows. When KWIM
+is unreachable the search says that skills are unavailable and why, rather than
+returning an empty result that would read as "no skill applies".
+
+Operators write and revise skills directly in the console. Agents propose new
+skills and revisions, which always wait for human review. Every version is kept,
+each skill has an owner, and a skill with a revision waiting for review is
+flagged when an agent searches or loads it. A skill can be limited to particular
+agent personas, and a team's skill hides a shared skill of the same name.
+
+Documents and skills share the way rules are shared: they belong to a team, and
+promotion copies one into the universe, where every team can read it.
+
 ## Tooling (+T)
 
 The tool layer is where agents act on systems outside KWIM - a Kubernetes
@@ -124,15 +170,17 @@ to gate the high-bar operations, which is the shape tool authorization wants.
 - [Deploying KWIM](docs/deployment.md) - prerequisites and the step-by-step bring-up
   order for standing up the full stack.
 - [Operating KWIM](docs/operations.md) - day-2: provisioning teams, adding code-graph
-  repos, governed cleanup/forget, rebuilds, and the failure modes worth knowing.
+  repos, managing documents and skills, governed cleanup/forget, rebuilds, and the
+  failure modes worth knowing.
 
 ## Layout
 
 | Path | What's in it |
 |------|--------------|
-| `services/api/` | The kwim-service - FastAPI app, the Postgres and FalkorDB stores, the gate, freshness/decay, graph rebuild, the admin API, and the code-graph extractor. Plus its tests. |
+| `services/api/` | The kwim-service - FastAPI app, the Postgres and FalkorDB stores, the gate, freshness/decay, graph rebuild, the admin API, the code-graph extractor, document ingestion and search, and skills. Plus its tests. |
+| `services/console/` | The admin console - a single-page app over the admin API for review, documents, skills, keys, and teams. |
 | `services/distiller/` | The distiller - a scheduled job that reads a team's episodic events, extracts durable learnings from them, and proposes those back through the gate like any other client. |
-| `clients/` | The Python client agents use to reach the kwim-service, plus model routing and secret reading. |
+| `clients/` | The Python client agents use to reach the kwim-service, including documents and skills, plus model routing and secret reading. |
 | `db/` | The per-team schema template and the admin schema. |
 | `k8s/` | Example Kubernetes manifests for running it. |
 

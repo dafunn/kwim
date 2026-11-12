@@ -182,7 +182,7 @@ class EventAccepted(BaseModel):
 
 class ProposalStatus(BaseModel):
     id: str
-    object_type: Literal["fact", "rule"]
+    object_type: Literal["fact", "rule", "skill"]
     status: Literal["accepted", "committed", "rejected", "pending_review"]
     detail: str | None = None
 
@@ -214,7 +214,7 @@ class CodeChange(BaseModel):
 
 class PendingProposal(BaseModel):
     proposal_id: str
-    object_type: Literal["fact", "rule"]
+    object_type: Literal["fact", "rule", "skill"]
     proposed_by: str | None
     created_at: datetime
     summary: str

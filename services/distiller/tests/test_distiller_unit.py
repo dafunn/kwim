@@ -131,7 +131,7 @@ class TestDistillAndAdvance:
         monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(_EVENTS, _NEXT_CURSOR))
 
         candidates = json.dumps([
-            {"kind": "fact", "statement": "ok fact", "fact_type": "observation", "evidence": [1]},
+            {"kind": "fact", "statement": "ok fact", "fact_type": "observation", "evidence": [1, 2]},
             {"kind": "fact", "statement": "missing fact_type", "evidence": [1]},
             {"kind": "advisory", "situation": "not-a-dict", "approach": "x", "evidence": [1]},
         ])
@@ -146,7 +146,7 @@ class TestDistillAndAdvance:
         await distiller_app.run()
 
         knowledge_propose.assert_awaited_once_with(
-            statement="ok fact", fact_type="observation", evidence=["evt-1"],
+            statement="ok fact", fact_type="observation", evidence=["evt-1", "evt-2"],
             decay_class=None, about=[], source_kind="distiller",
         )
         wisdom_propose.assert_not_called()
@@ -273,7 +273,7 @@ class TestFailSoft:
         monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(_EVENTS, _NEXT_CURSOR))
 
         candidates = json.dumps([
-            {"kind": "fact", "statement": "x", "fact_type": "observation", "evidence": [1]},
+            {"kind": "fact", "statement": "x", "fact_type": "observation", "evidence": [1, 2]},
         ])
         monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: _FakeLLM(candidates))
         monkeypatch.setattr(distiller_app, "knowledge_propose", AsyncMock(return_value=None))
@@ -327,7 +327,7 @@ class TestDecayClass:
 
         candidates = json.dumps([
             {"kind": "fact", "statement": "x", "fact_type": "observation",
-             "decay_class": "bogus", "evidence": [1]},
+             "decay_class": "bogus", "evidence": [1, 2]},
         ])
         monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: _FakeLLM(candidates))
 
@@ -339,7 +339,7 @@ class TestDecayClass:
         await distiller_app.run()
 
         knowledge_propose.assert_awaited_once_with(
-            statement="x", fact_type="observation", evidence=["evt-1"], decay_class=None,
+            statement="x", fact_type="observation", evidence=["evt-1", "evt-2"], decay_class=None,
             about=[], source_kind="distiller",
         )
 
@@ -351,7 +351,7 @@ class TestAbout:
 
         candidates = json.dumps([
             {"kind": "fact", "statement": "x", "fact_type": "observation",
-             "evidence": [1], "about": ["demoproject", "friday"]},
+             "evidence": [1, 2], "about": ["demoproject", "friday"]},
         ])
         monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: _FakeLLM(candidates))
 
@@ -363,7 +363,7 @@ class TestAbout:
         await distiller_app.run()
 
         knowledge_propose.assert_awaited_once_with(
-            statement="x", fact_type="observation", evidence=["evt-1"], decay_class=None,
+            statement="x", fact_type="observation", evidence=["evt-1", "evt-2"], decay_class=None,
             about=["demoproject", "friday"], source_kind="distiller",
         )
 
@@ -373,7 +373,7 @@ class TestAbout:
 
         candidates = json.dumps([
             {"kind": "fact", "statement": "x", "fact_type": "observation",
-             "evidence": [1], "about": ["demoproject", 42, "", None]},
+             "evidence": [1, 2], "about": ["demoproject", 42, "", None]},
         ])
         monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: _FakeLLM(candidates))
 
@@ -385,7 +385,7 @@ class TestAbout:
         await distiller_app.run()
 
         knowledge_propose.assert_awaited_once_with(
-            statement="x", fact_type="observation", evidence=["evt-1"], decay_class=None,
+            statement="x", fact_type="observation", evidence=["evt-1", "evt-2"], decay_class=None,
             about=["demoproject"], source_kind="distiller",
         )
 
@@ -546,3 +546,53 @@ class TestRecalledKnowledge:
         assert "A single tool result is not a fact" in distiller_app._SYSTEM_PROMPT
         assert "refused or denied request" in distiller_app._SYSTEM_PROMPT
         assert "Treat these as primary evidence" not in distiller_app._SYSTEM_PROMPT
+
+
+class TestMinFactTurns:
+    """A fact must cite DISTILLER_MIN_FACT_TURNS distinct events."""
+
+    async def _run(self, distiller_app, monkeypatch, candidates):
+        monkeypatch.setattr(distiller_app, "read_episodic", _no_watermark_window(_EVENTS, _NEXT_CURSOR))
+        fake_llm = _FakeLLM(json.dumps(candidates))
+        monkeypatch.setattr(distiller_app, "make_llm", lambda *a, **kw: fake_llm)
+        knowledge_propose = AsyncMock(return_value={"proposal_id": "p1"})
+        wisdom_propose = AsyncMock(return_value={"proposal_id": "p2"})
+        post = AsyncMock(return_value={"event_id": "wm1"})
+        monkeypatch.setattr(distiller_app, "knowledge_propose", knowledge_propose)
+        monkeypatch.setattr(distiller_app, "wisdom_propose", wisdom_propose)
+        monkeypatch.setattr(distiller_app, "_post", post)
+        await distiller_app.run()
+        return fake_llm, knowledge_propose, wisdom_propose, post
+
+    @pytest.mark.asyncio
+    async def test_fact_citing_one_event_is_dropped_and_advisory_is_kept(self, distiller_app, monkeypatch):
+        _, knowledge_propose, wisdom_propose, post = await self._run(distiller_app, monkeypatch, [
+            {"kind": "fact", "statement": "one turn", "fact_type": "observation", "evidence": [1]},
+            {"kind": "advisory", "situation": {"project": "demoproject"}, "approach": "y", "evidence": [1]},
+        ])
+        knowledge_propose.assert_not_called()
+        wisdom_propose.assert_awaited_once()
+        post.assert_awaited_once()                    # the window is consumed, not retried
+
+    @pytest.mark.asyncio
+    async def test_repeated_and_unresolvable_refs_do_not_count(self, distiller_app, monkeypatch):
+        _, knowledge_propose, _, _ = await self._run(distiller_app, monkeypatch, [
+            {"kind": "fact", "statement": "x", "fact_type": "observation", "evidence": [1, 1, "1", 99]},
+        ])
+        knowledge_propose.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_threshold_is_configurable(self, distiller_app, monkeypatch):
+        monkeypatch.setattr(distiller_app, "MIN_FACT_TURNS", 1)
+        _, knowledge_propose, _, _ = await self._run(distiller_app, monkeypatch, [
+            {"kind": "fact", "statement": "x", "fact_type": "observation", "evidence": [1]},
+        ])
+        knowledge_propose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_prompt_states_the_threshold(self, distiller_app, monkeypatch):
+        monkeypatch.setattr(distiller_app, "MIN_FACT_TURNS", 3)
+        fake_llm, _, _, _ = await self._run(distiller_app, monkeypatch, [])
+        system = fake_llm.calls[0][0].content
+        assert "at least 3 different events" in system
+        assert "{min_fact_turns}" not in system

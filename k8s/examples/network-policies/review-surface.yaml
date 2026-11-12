@@ -1,0 +1,24 @@
+# Optional: the review surface (deployment.md step 12). kwim-service posts each
+# proposal to the Mattermost incoming webhook in `mm-webhook-url`; without this
+# rule the post is refused, kwim-service logs "Mattermost ... notify failed",
+# and the proposal is never announced (posts are not retried). Add this file to
+# the kustomization's resources if you set `mm-webhook-url`, with
+# <mattermost-cidr> the address Mattermost's webhook resolves to (a /32 for one
+# server) and the port it listens on.
+#
+# The buttons on each post call back into kwim-service at KWIM_SERVICE_URL. That
+# direction needs no rule here if the URL is your ingress, which
+# kwim-service-ingress-external already admits; see step 12.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kwim-service-egress-review-surface
+spec:
+  podSelector:
+    matchLabels: { app: kwim-service }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: { cidr: <mattermost-cidr> }
+      ports:
+        - { port: 443, protocol: TCP }

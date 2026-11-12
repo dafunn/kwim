@@ -2,7 +2,9 @@
 
 Two coupled artifacts: the FalkorDB graph model (the queryable projection:
 K + W + provenance + semantic Memory) and the Postgres commit log (the
-durable, replayable system-of-record the graph is rebuilt from).
+durable, replayable system-of-record the graph is rebuilt from). Documents and
+skills also keep their content in Postgres tables of their own (sections 1.6
+and 1.7); documents are projected into a separate graph (section 2.5).
 
 The relationship is the spine of everything else: every governed write is a
 commit-log row; the graph is the materialized view of replaying the log (+ git
@@ -22,14 +24,15 @@ CREATE TABLE IF NOT EXISTS <team>.commit_log (
     seq           bigserial   PRIMARY KEY,                 -- monotonic replay order
     id            uuid        NOT NULL DEFAULT gen_random_uuid(),
     committed_at  timestamptz NOT NULL DEFAULT now(),
-    object_type   text        NOT NULL CHECK (object_type IN ('fact','rule','semantic')),
+    object_type   text        NOT NULL CHECK (object_type IN ('fact','rule','semantic','document','skill')),
     object_id     text        NOT NULL,                    -- the K fact / W rule (text, not uuid: seed path uses human-readable ids)
-    operation     text        NOT NULL CHECK (operation IN ('commit','deprecate','reinforce','retract','confirm','amend')),
+    operation     text        NOT NULL CHECK (operation IN ('commit','deprecate','reinforce','retract','confirm','amend',
+                                                            'revise','retire','restore')),
     payload       jsonb       NOT NULL DEFAULT '{}'::jsonb, -- object content -> recreate the node
     provenance    jsonb       NOT NULL DEFAULT '{}'::jsonb, -- edges -> recreate the relationships
     proposed_by   text,                                    -- agent id
-    source_kind   text        CHECK (source_kind IN ('agent_proposal','repo_sync','promotion')),
-    gate_decision text        CHECK (gate_decision IN ('auto_committed','human_approved'))
+    source_kind   text        CHECK (source_kind IN ('agent_proposal','repo_sync','promotion','distiller')),
+    gate_decision text        CHECK (gate_decision IN ('auto_committed','human_approved','human_retracted','human_confirmed'))
 );
 CREATE INDEX IF NOT EXISTS idx_<team>_commit_object  ON <team>.commit_log (object_id, seq);
 CREATE INDEX IF NOT EXISTS idx_<team>_commit_type    ON <team>.commit_log (object_type, committed_at);
@@ -43,6 +46,11 @@ Operations (supersession is encoded in provenance, not a separate op):
 - `reinforce` - bump a rule's `evidence_count` with new supporting evidence
   (object_id + the evidence refs in payload). The advisory-rule confidence path.
 - `retract` / `confirm` - human post-hoc review of a committed object (status only).
+  For a document, `retract` removes it from search and keeps its rows and files.
+- `revise` - a new revision of a document, or a new version of a skill. The
+  content is in the document's or skill's own tables; `payload` identifies it.
+- `retire` / `restore` - a skill is hidden from agents, or brought back. Its
+  versions are kept.
 - `amend` - replace an object's content in place. `payload` carries the new values
   for the amended fields only; `provenance` carries
   `{amended_by, amended_via, previous_payload}`, where `previous_payload` holds
@@ -77,6 +85,18 @@ Operations (supersession is encoded in provenance, not a separate op):
   are skipped by `/check`). `severity` is a free string (`low|medium|high|critical` by
   convention).
 
+- document: `{title, tags, revision_id, revision_number, label, sha256, mime_type,
+  filename, byte_size}` for an upload or revision; a promotion's universe row
+  carries `{title, tags, revision_id, sha256}` and `provenance`
+  `{promoted_from_team, promoted_from_id, promoted_by, promoted_via, promoted_at}`.
+- skill: `{name, version, description}`; the text is in `skill_versions`.
+  `provenance` names the author or approver, the path (`via`), and for an
+  approved proposal its id.
+
+Document and skill rows are a record of what changed, who changed it, and when.
+Their content lives in their own tables (sections 1.6 and 1.7), and the team
+graph rebuild skips them.
+
 `provenance` shape: `{proposed_by:<agent>, supported_by:[<episodic_event_id>...],
 supersedes:<object_id?>, references:[<fact_id>...], about:[<entity_ref>...]}`. These
 are exactly the edges to recreate in the graph.
@@ -105,6 +125,37 @@ One row per fact, upserted - only the latest verification feeds freshness, so
 per-reaffirm history would grow without a consumer. Deliberately not `commit_log`
 rows: reaffirm asserts continued currency rather than a governed content change, and
 it runs often enough to bloat a log that is replayed in full on every rebuild.
+
+---
+
+## 1.6 Postgres documents - `<team>.documents`, `document_revisions`, `document_figures`
+
+| Table | Holds |
+|---|---|
+| `documents` | One row per document: `id`, `title`, `tags`, `status` (`ingesting`, `ready`, `failed`, `retracted`), `current_revision` (its newest ready revision), `promoted_to` on a promoted team document, `promoted_from_team` / `promoted_from_id` on a universe copy, created and updated stamps |
+| `document_revisions` | One row per uploaded revision: `revision_number`, `label`, `sha256` of the original, `mime_type`, `filename`, `byte_size`, `page_count`, `extractor` and `extractor_version`, `extracted` (JSONB, the extraction every later step reads), `status`, `error`, upload and ingest stamps |
+| `document_figures` | One row per figure cut from a revision: `figure_id`, `page`, `caption`, and `object_key`, the image's path on the documents volume |
+
+The original files and figure images are on the documents volume, under
+`<team>/originals/<sha256>` and `<team>/figures/<sha256>/`, written once and
+never modified. `extracted` is a tree of sections (heading, level, pages,
+children) holding blocks (paragraph, step, list, table, warning, caution, note,
+figure reference, code), plus the figures. Each document keeps at most
+`documents.max_revisions` revisions; past that the oldest revision's rows go,
+and its files when nothing else refers to the same sha256.
+
+---
+
+## 1.7 Postgres skills - `<team>.skills`, `skill_versions`
+
+| Table | Holds |
+|---|---|
+| `skills` | One row per skill: `id`, `name` (unique in the team), `status` (`current`, `retired`), `current_version`, `owner` (an operator account), `promoted_to` on a promoted team skill, `promoted_from_team` / `promoted_from_id` on a universe copy, created and updated stamps |
+| `skill_versions` | One row per version, never updated except to add its embedding: `version`, the whole SKILL.md `text`, its parsed `description`, `body`, `agents`, `tags` and `refs`, `embedding` (of the whole skill; null until the embedder has run), `source` (`human`, `agent_proposal`, `promotion`), `author`, `approver`, `proposal_id` |
+
+A GIN full-text index on the description and body serves search when the
+embedder is unavailable. Agent proposals wait in `<team>.pending_proposals`
+(`object_type` `skill`) until reviewed.
 
 ---
 
@@ -174,6 +225,32 @@ graph nodes. Not rebuilt on recovery.
 
 ---
 
+## 2.5 FalkorDB documents graph - graph `kwim_<team>_docs`
+
+The current revision of each ready document, projected from its stored
+extraction:
+
+```
+(:Document {id, title, revision, tags, status})
+(:Section {id, heading, path, level, page_start, page_end})-[:PART_OF]->(:Section | :Document)
+(:Chunk {id, seq, text, heading_path, page_start, page_end, block_types, embedding})-[:IN]->(:Section)
+(:Chunk)-[:NEXT]->(:Chunk)
+(:Figure {id, caption, page, object_key})-[:IN]->(:Section)
+(:Chunk)-[:REFERS_TO]->(:Figure)
+```
+
+Section, chunk and figure ids are `<document id>:<local id>`, and every node
+carries `document_id`, so a document is replaced or removed as a unit. Indexes:
+`id` and `document_id` on each label, a vector index on `Chunk.embedding`
+(dimension `documents.embedder.dim`, cosine, `efRuntime` 200), and a full-text
+index on `Chunk.text` and `Chunk.heading_path`.
+
+Rebuild: `python -m kwim_api.documents.rebuild` re-chunks, re-embeds and
+re-projects every ready document from `document_revisions.extracted` into a
+temporary graph and swaps it in. It reads Postgres only.
+
+---
+
 ## 3. Replay / rebuild contract
 
 Rebuild a team's graph from durable sources:
@@ -191,7 +268,9 @@ Rebuild a team's graph from durable sources:
    log in step 3 instead; that step runs first, so an episodic-derived item wins on
    any id collision.
 
-Working memory is not rebuilt (ephemeral).
+Working memory is not rebuilt (ephemeral). Document and skill rows in the log
+are skipped: documents have their own graph (section 2.5) and skills are read
+from Postgres.
 
 Both timestamps matter because freshness is computed from
 `max(created_at, last_verified_at)`: without step 3's `committed_at` restore every
@@ -257,3 +336,10 @@ Proposed shape (the sanitization is not fully solved yet):
 
 This is purely additive to the per-team model - universe is one more
 tenant (graph + commit log).
+
+Documents and skills are promoted the same way, as copies with a promotion
+record: a universe document (rows, files and extraction shared by content hash,
+projected into `kwim_universe_docs`) or a universe skill version with `source`
+`promotion`. The team copy records `promoted_to`. A team reads both scopes;
+search returns a promoted document once, and a team skill hides a universe
+skill of the same name.

@@ -18,6 +18,7 @@ def _embedder(handler) -> Embedder:
     """A real Embedder whose HTTP client is backed by `handler`."""
     e = Embedder.__new__(Embedder)          # bypass __init__: no settings, no real socket
     e._url = "http://embedder.test"
+    e._max_batch = embedder_mod.settings.embedder_max_batch
     e._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return e
 

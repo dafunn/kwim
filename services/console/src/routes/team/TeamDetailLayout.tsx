@@ -13,6 +13,8 @@ const TABS = [
   { to: "commit-log", label: "Commit log" },
   { to: "proposals", label: "Proposals" },
   { to: "code", label: "Code" },
+  { to: "documents", label: "Documents" },
+  { to: "skills", label: "Skills" },
   { to: "keys", label: "Keys" },
 ];
 

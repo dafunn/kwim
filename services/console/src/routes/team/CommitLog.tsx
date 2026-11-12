@@ -9,7 +9,7 @@ import { LoadMore } from "../../components/LoadMore";
 import styles from "../../components/ui.module.css";
 
 const OPERATIONS = ["commit", "deprecate", "reinforce", "retract", "confirm", "amend"];
-const OBJECT_TYPES = ["fact", "rule", "semantic"];
+const OBJECT_TYPES = ["fact", "rule", "semantic", "document", "skill"];
 const GATE_DECISIONS = ["auto_committed", "human_approved", "human_retracted", "human_confirmed"];
 
 const DEFAULT_FILTERS: CommitLogFilters = { order: "desc" };

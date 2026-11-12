@@ -47,19 +47,9 @@ export interface paths {
         };
         /**
          * Knowledge Search
-         * @description Semantic search over governed facts - Tier 1 retrieval for Knowledge.
-         *
-         *     The retrieval counterpart to /query. /query needs the caller to already know the
-         *     tag it wants; this one takes free text and answers "what do we know about this?"
-         *     - the case where the agent does not know what it is looking for.
-         *
-         *     Results are ranked by cosine distance (`score`, lower = closer) and are not
-         *     re-sorted by freshness; each carries its own freshness marker so the caller
-         *     can judge.
-         *     `about` / `fact_type` narrow the candidate set before scoring, with the same
-         *     case-insensitive semantics /query uses.
-         *
-         *     Facts with no embedding cannot match - see `kwim_api.backfill_embeddings`.
+         * @description Semantic search over current facts, ranked by cosine distance (`score`,
+         *     lower is closer), each with its freshness. `about` and `fact_type` filter
+         *     before scoring. See docs/DESIGN.md, "Retrieval".
          */
         get: operations["knowledge_search_v1_knowledge_search_get"];
         put?: never;
@@ -98,15 +88,8 @@ export interface paths {
         put?: never;
         /**
          * Knowledge Reaffirm
-         * @description Non-governance freshness touch: stamp last_verified_at = now.
-         *
-         *     Distinct from human confirm/retract - this is a machine assertion that the
-         *     source still vouches for the fact. 404 if the fact does not exist.
-         *
-         *     The graph write runs first because it doubles as the existence check, so a 404
-         *     leaves no verification row behind; the Postgres row is what survives a rebuild.
-         *     Both stores receive the same timestamp, and the write is an upsert, so a retry
-         *     after a partial failure converges.
+         * @description Stamp last_verified_at = now on a current fact, in the graph (which also
+         *     checks it exists; 404 if not) and then in fact_verifications.
          */
         post: operations["knowledge_reaffirm_v1_knowledge_facts__fact_id__reaffirm_post"];
         delete?: never;
@@ -158,10 +141,7 @@ export interface paths {
         };
         /**
          * Wisdom Rules
-         * @description Applicable rules for a situation.
-         *
-         *     The situation is an open set of team-defined key/values passed as
-         *     ?situation.<key>=<value> params, AND-matched against rule situations.
+         * @description Approved rules matching every ?situation.<key>=<value> param.
          */
         get: operations["wisdom_rules_v1_wisdom_rules_get"];
         put?: never;
@@ -200,15 +180,9 @@ export interface paths {
         put?: never;
         /**
          * Wisdom Check
-         * @description Deterministic constraint enforcement - sync, no LLM, target <50ms.
-         *
-         *     Loads approved deterministic constraints (team + universe merged), evaluates
-         *     each rule's action_pattern regex against action["content"], and resolves
-         *     to one verdict:
-         *       - critical severity -> escalate (regardless of stored verdict).
-         *       - else highest-severity match's stored verdict wins.
-         *       - no match -> allow.
-         *     classifier-tier constraints are skipped in v1 (needs the embedder).
+         * @description Evaluate approved deterministic constraints (team and universe) against
+         *     action["content"]: a critical match escalates, otherwise the highest-severity
+         *     match's verdict wins, and no match allows. Classifier constraints are skipped.
          */
         post: operations["wisdom_check_v1_wisdom_check_post"];
         delete?: never;
@@ -228,12 +202,8 @@ export interface paths {
         put?: never;
         /**
          * Wisdom Promote
-         * @description Promote an approved team rule to the shared universe graph. Human-only.
-         *
-         *     Gated by the `promote` capability. Proper RBAC is a later addition.
-         *
-         *     Creates a new universe object (new id) copying rule content with scope=universe
-         *     and provenance = the promotion record only. No team-private evidence crosses.
+         * @description Copy an approved team rule into the universe graph as a new object, with the
+         *     promotion as its only provenance. Requires `promote`.
          */
         post: operations["wisdom_promote_v1_wisdom_promote__rule_id__post"];
         delete?: never;
@@ -253,16 +223,8 @@ export interface paths {
         put?: never;
         /**
          * Wisdom Seed
-         * @description Operator-gated direct commit of an approved rule to a team graph.
-         *
-         *     This is the escape hatch for human-curated seeding: it bypasses the
-         *     proposal/approval cycle and writes directly to FalkorDB with
-         *     status='approved'. Gated by the same `promote` capability used for universe
-         *     promotion (human-only, high-bar).
-         *
-         *     The rule idempotency key is the caller-supplied `id`. Overwrites on re-seed.
-         *     Mirrors the promote endpoint's commit path: append_commit needs `gate_decision`
-         *     and materialize_rule needs `commit_seq` (both hard keys) - pass both.
+         * @description Commit an approved rule directly, bypassing review; keyed by the caller's
+         *     `id`, so re-seeding overwrites. Requires `promote`.
          */
         post: operations["wisdom_seed_v1_wisdom_seed_post"];
         delete?: never;
@@ -280,15 +242,9 @@ export interface paths {
         };
         /**
          * Memory Episodic Window
-         * @description Windowed, team-scoped read over episodic events on the (occurred_at, id) cursor.
-         *
-         *     `since_ts`/`since_id` form an exclusive composite cursor (the watermark); omit both
-         *     to read from the start (`order=asc`, default) or end (`order=desc`). `order=desc`
-         *     returns newest-first and treats the cursor as an exclusive upper bound - e.g.
-         *     `?event_type=distiller_watermark&limit=1&order=desc` fetches the single latest
-         *     watermark event in O(1) regardless of how many have accumulated. Used by the
-         *     distiller and other batch readers - a query, not a gate-write, so it's a plain
-         *     authenticated read.
+         * @description Windowed read over the team's episodic events. `since_ts`/`since_id` is an
+         *     exclusive cursor: a lower bound for `order=asc` (default), an upper bound for
+         *     `order=desc`; omit both to read from the start or end.
          */
         get: operations["memory_episodic_window_v1_memory_episodic_get"];
         put?: never;
@@ -309,17 +265,9 @@ export interface paths {
         };
         /**
          * Memory Context
-         * @description Assemble working context for a turn.
-         *
-         *     Wisdom enrichment: calls query_rules with the open situation dict
-         *     (?situation.<key>=<value> params) and packs approved rules, ranked by
-         *     evidence_count.
-         *
-         *     Knowledge enrichment: when `subject` is present, the knowledge slot is the union
-         *     of an exact `about` tag match and a semantic KNN over the same facts, so a
-         *     free-text subject the caller has no tag for still retrieves. Coverage markers
-         *     signal whether each slot was queried and non-empty (the absence trigger for
-         *     callers), and break the knowledge count down by how it was found.
+         * @description Assemble working context for a turn: knowledge for `subject` (tag matches,
+         *     then semantic matches), approved rules for the situation, recent events and
+         *     code, with coverage markers. See docs/DESIGN.md, "Retrieval".
          */
         get: operations["memory_context_v1_memory_context_get"];
         put?: never;
@@ -351,14 +299,8 @@ export interface paths {
         put?: never;
         /**
          * Memory Semantic Write
-         * @description Explicit semantic write (direct write path).
-         *
-         *     Accepts content + optional metadata, embeds it, and writes to FalkorDB.
-         *     If `id` is omitted, generates a UUID.
-         *
-         *     Routed through the gate so the write lands in commit_log first. Unlike the
-         *     bus-fed path, this one has no episodic source for a rebuild to re-derive from,
-         *     so the log row is the item's only durable record.
+         * @description Write a semantic item directly through the gate (commit_log row, then the
+         *     node). Generates an id if none is given.
          */
         post: operations["memory_semantic_write_v1_memory_semantic_post"];
         delete?: never;
@@ -411,11 +353,7 @@ export interface paths {
         };
         /**
          * Review Pending
-         * @description Team-scoped read: any team key can read its own queue.
-         *
-         *     Reading your own team's pending proposals is no more sensitive than reading
-         *     your own knowledge/wisdom (already allowed by the team key). Approve/reject
-         *     stay gated by the `review` capability - that's the governance authority.
+         * @description The team's pending proposals; any key with `read` may list them.
          */
         get: operations["review_pending_v1_review_pending_get"];
         put?: never;
@@ -471,11 +409,8 @@ export interface paths {
         put?: never;
         /**
          * Review Mm Action
-         * @description mattermost interactive-button callback.
-         *
-         *     Not behind current_team - mattermost has no team bearer key. Authenticated
-         *     by a shared secret embedded in the button's context (fail-closed: an unset
-         *     KWIM_MM_ACTION_SECRET means this endpoint always 403s).
+         * @description Mattermost button callback for pending proposals, authenticated by the
+         *     shared secret in the button (403 when KWIM_MM_ACTION_SECRET is unset).
          */
         post: operations["review_mm_action_v1_review_mm_action_post"];
         delete?: never;
@@ -495,11 +430,8 @@ export interface paths {
         put?: never;
         /**
          * Review Committed Action
-         * @description mattermost interactive-button callback for committed objects.
-         *
-         *     Distinct from `/mm-action`: buttons here carry an `object_id`/`object_type`
-         *     (a committed graph node), not a `proposal_id` (a pending_proposals row).
-         *     Same hmac-secret auth as `/mm-action`.
+         * @description Mattermost button callback for committed objects (`object_id`,
+         *     `object_type`), authenticated like /mm-action.
          */
         post: operations["review_committed_action_v1_review_committed_action_post"];
         delete?: never;
@@ -609,6 +541,198 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Documents List */
+        get: operations["documents_list_v1_documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Documents Search
+         * @description Sections that answer `q`, best first, each with its citation (document,
+         *     revision, section path, pages) and figures.
+         */
+        get: operations["documents_search_v1_documents_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/{document_id}/sections/{section_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Documents Section */
+        get: operations["documents_section_v1_documents__document_id__sections__section_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/{document_id}/figures/{figure_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Documents Figure */
+        get: operations["documents_figure_v1_documents__document_id__figures__figure_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/{document_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Documents Promote
+         * @description Copy one of the team's ready documents into the universe. Requires `promote`.
+         */
+        post: operations["documents_promote_v1_documents__document_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/skills/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Skills Search
+         * @description Skills that match `q`, best first: names and descriptions, not bodies.
+         *     With `agent`, only skills offered to that persona.
+         */
+        get: operations["skills_search_v1_skills_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills List */
+        get: operations["skills_list_v1_skills_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/skills/propose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Skills Propose
+         * @description Propose a new skill, or with `supersedes` a revision (`scope: universe`
+         *     for a universe skill). Always goes to human review.
+         */
+        post: operations["skills_propose_v1_skills_propose_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/skills/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Skills Get
+         * @description The skill to follow: its body, refs and version.
+         */
+        get: operations["skills_get_v1_skills__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/skills/{name}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Skills Promote
+         * @description Copy the team's skill into the universe. Requires `promote`. When the
+         *     universe already has the name, the promotion waits for operator review.
+         */
+        post: operations["skills_promote_v1_skills__name__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/admin/session": {
         parameters: {
             query?: never;
@@ -636,9 +760,8 @@ export interface paths {
         };
         /**
          * Admin Teams
-         * @description Reconciles kwim_admin.teams against list_team_schemas(): a team can be
-         *     provisioned outside the console, and a console record can exist for a team
-         *     whose schema was never created. Both surface here, flagged.
+         * @description Console records reconciled with the schemas that exist, each flagged with
+         *     has_schema and has_console_record.
          */
         get: operations["admin_teams_v1_admin_teams_get"];
         put?: never;
@@ -764,14 +887,8 @@ export interface paths {
         };
         /**
          * Admin Episodic
-         * @description Proxies `read_episodic` (same 422 validation as /v1/memory/episodic), plus
-         *     the admin additions: `archived`, `cursor`, and the standard envelope.
-         *
-         *     `cursor` is the opaque form of the (since_ts, since_id) pair, so the console can
-         *     page this endpoint with the value it was handed rather than decoding it - the
-         *     raw pair stays accepted for parity with /v1/memory/episodic. In `order=desc` the
-         *     underlying reader treats the same pair as an exclusive upper bound, so one cursor
-         *     shape serves both directions.
+         * @description `read_episodic` with `archived`, an opaque `cursor` (or the raw
+         *     since_ts/since_id pair), and the list envelope.
          */
         get: operations["admin_episodic_v1_admin_teams__team__episodic_get"];
         put?: never;
@@ -808,8 +925,7 @@ export interface paths {
         };
         /**
          * Admin Commit Log
-         * @description `cursor` is the opaque form of `since_seq`, so the console can page with the
-         *     value it was handed; the raw `since_seq` stays accepted for scripted callers.
+         * @description Takes an opaque `cursor` or a raw `since_seq`.
          */
         get: operations["admin_commit_log_v1_admin_teams__team__commit_log_get"];
         put?: never;
@@ -827,7 +943,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Admin Proposals */
+        /**
+         * Admin Proposals
+         * @description `source_kind` is bulk reject's filter, so this shows (and with `count=true`
+         *     counts) what a bulk rejection would resolve.
+         */
         get: operations["admin_proposals_v1_admin_teams__team__proposals_get"];
         put?: never;
         post?: never;
@@ -1352,6 +1472,286 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/admin/teams/{team}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin List Documents */
+        get: operations["admin_list_documents_v1_admin_teams__team__documents_get"];
+        put?: never;
+        /**
+         * Admin Upload Document
+         * @description Upload a new document. Returns once the file is stored; ingestion runs as
+         *     a job (GET /v1/admin/jobs/{job_id}).
+         */
+        post: operations["admin_upload_document_v1_admin_teams__team__documents_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Upload Revision
+         * @description Upload a new revision of an existing document.
+         */
+        post: operations["admin_upload_revision_v1_admin_teams__team__documents__document_id__revisions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin Document Detail */
+        get: operations["admin_document_detail_v1_admin_teams__team__documents__document_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}/retract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Retract Document
+         * @description Remove a document from search; its rows and files are kept.
+         */
+        post: operations["admin_retract_document_v1_admin_teams__team__documents__document_id__retract_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}/forget/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Forget Document Preview
+         * @description What forgetting the document removes, and a single-use token to do it.
+         */
+        post: operations["admin_forget_document_preview_v1_admin_teams__team__documents__document_id__forget_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}/forget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Forget Document
+         * @description Delete the document everywhere. Needs the token from forget/preview.
+         */
+        post: operations["admin_forget_document_v1_admin_teams__team__documents__document_id__forget_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/documents/{document_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Promote Document
+         * @description Copy a ready team document into the universe.
+         */
+        post: operations["admin_promote_document_v1_admin_teams__team__documents__document_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin List Skills */
+        get: operations["admin_list_skills_v1_admin_teams__team__skills_get"];
+        put?: never;
+        /** Admin Create Skill */
+        post: operations["admin_create_skill_v1_admin_teams__team__skills_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin Skill Detail */
+        get: operations["admin_skill_detail_v1_admin_teams__team__skills__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin Skill Version */
+        get: operations["admin_skill_version_v1_admin_teams__team__skills__name__versions__version__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Admin Revise Skill */
+        post: operations["admin_revise_skill_v1_admin_teams__team__skills__name__revisions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Admin Retire Skill */
+        post: operations["admin_retire_skill_v1_admin_teams__team__skills__name__retire_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Admin Restore Skill */
+        post: operations["admin_restore_skill_v1_admin_teams__team__skills__name__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/owner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Admin Set Skill Owner */
+        put: operations["admin_set_skill_owner_v1_admin_teams__team__skills__name__owner_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/teams/{team}/skills/{name}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Promote Skill
+         * @description Copy the skill into the universe; when the universe has the name, the
+         *     copy becomes its next version.
+         */
+        post: operations["admin_promote_skill_v1_admin_teams__team__skills__name__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1393,7 +1793,9 @@ export interface components {
              */
             rule_type: "advisory";
             /** Situation */
-            situation: Record<string, never>;
+            situation: {
+                [key: string]: unknown;
+            };
             /** Approach */
             approach: string;
             /** Evidence */
@@ -1423,7 +1825,9 @@ export interface components {
         /** AmendRuleRequest */
         AmendRuleRequest: {
             /** Situation */
-            situation?: Record<string, never> | null;
+            situation?: {
+                [key: string]: unknown;
+            } | null;
             /** Approach */
             approach?: string | null;
             /** Action Pattern */
@@ -1444,7 +1848,9 @@ export interface components {
             /** Content */
             content?: string | null;
             /** Metadata */
-            metadata?: Record<string, never> | null;
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
             /** Reason */
             reason: string;
         };
@@ -1479,7 +1885,9 @@ export interface components {
         /** CheckRequest */
         CheckRequest: {
             /** Action */
-            action: Record<string, never>;
+            action: {
+                [key: string]: unknown;
+            };
         };
         /** CheckResult */
         CheckResult: {
@@ -1498,7 +1906,9 @@ export interface components {
         /** CodeArchitecture */
         CodeArchitecture: {
             /** Communities */
-            communities?: Record<string, never>[];
+            communities?: {
+                [key: string]: unknown;
+            }[];
         };
         /** CodeChange */
         CodeChange: {
@@ -1592,7 +2002,9 @@ export interface components {
             /** Event Type */
             event_type: string;
             /** Event Data */
-            event_data?: Record<string, never>;
+            event_data?: {
+                [key: string]: unknown;
+            };
         };
         /** EpisodicEventOut */
         EpisodicEventOut: {
@@ -1605,7 +2017,9 @@ export interface components {
             /** Event Type */
             event_type: string;
             /** Event Data */
-            event_data?: Record<string, never>;
+            event_data?: {
+                [key: string]: unknown;
+            };
             /** Occurred At */
             occurred_at: string;
         };
@@ -1671,10 +2085,7 @@ export interface components {
         };
         /**
          * FactMatch
-         * @description A fact returned by semantic search (knowledge/search).
-         *
-         *     `score` is a cosine distance - lower = closer, identical vector -> 0.0 - the same
-         *     convention as SemanticItem.score, so callers rank ascending.
+         * @description A fact returned by knowledge/search; `score` is a cosine distance (lower is closer).
          */
         FactMatch: {
             /** Id */
@@ -1744,6 +2155,11 @@ export interface components {
             /** Supersedes */
             supersedes?: string | null;
         };
+        /** ForgetDocumentRequest */
+        ForgetDocumentRequest: {
+            /** Preview Token */
+            preview_token: string;
+        };
         /** ForgetExecuteRequest */
         ForgetExecuteRequest: {
             /** Preview Token */
@@ -1756,7 +2172,9 @@ export interface components {
             /** Object Ids */
             object_ids?: string[] | null;
             /** Select */
-            select?: Record<string, never> | null;
+            select?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1780,7 +2198,7 @@ export interface components {
              * Object Type
              * @enum {string}
              */
-            object_type: "fact" | "rule";
+            object_type: "fact" | "rule" | "skill";
             /** Proposed By */
             proposed_by: string | null;
             /**
@@ -1791,7 +2209,9 @@ export interface components {
             /** Summary */
             summary: string;
             /** Body */
-            body: Record<string, never>;
+            body: {
+                [key: string]: unknown;
+            };
         };
         /** ProposalStatus */
         ProposalStatus: {
@@ -1801,7 +2221,7 @@ export interface components {
              * Object Type
              * @enum {string}
              */
-            object_type: "fact" | "rule";
+            object_type: "fact" | "rule" | "skill";
             /**
              * Status
              * @enum {string}
@@ -1828,6 +2248,11 @@ export interface components {
             /** Reason */
             reason?: string | null;
         };
+        /** RetractDocumentRequest */
+        RetractDocumentRequest: {
+            /** Reason */
+            reason?: string | null;
+        };
         /** RetractRequest */
         RetractRequest: {
             /** Object Type */
@@ -1845,7 +2270,9 @@ export interface components {
              */
             rule_type: "advisory" | "constraint";
             /** Situation */
-            situation?: Record<string, never> | null;
+            situation?: {
+                [key: string]: unknown;
+            } | null;
             /** Approach */
             approach?: string | null;
             /**
@@ -1883,11 +2310,7 @@ export interface components {
         };
         /**
          * SeedRule
-         * @description Full rule payload for POST /v1/wisdom/seed (operator-gated direct commit).
-         *
-         *     Unlike the `Rule` read-model, this carries the constraint enforcement fields
-         *     (action_pattern/verdict/authority/severity/check_tier) so a seeded
-         *     constraint isn't stripped to an empty husk.
+         * @description Full rule payload for POST /v1/wisdom/seed, including the constraint fields.
          */
         SeedRule: {
             /** Id */
@@ -1899,7 +2322,9 @@ export interface components {
              */
             rule_type: "advisory" | "constraint";
             /** Situation */
-            situation?: Record<string, never> | null;
+            situation?: {
+                [key: string]: unknown;
+            } | null;
             /** Approach */
             approach?: string | null;
             /**
@@ -1927,7 +2352,9 @@ export interface components {
             /** Score */
             score: number;
             /** Metadata */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
         };
         /** SemanticWrite */
         SemanticWrite: {
@@ -1936,7 +2363,39 @@ export interface components {
             /** Content */
             content: string;
             /** Metadata */
-            metadata?: Record<string, never>;
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /** SkillCreateRequest */
+        SkillCreateRequest: {
+            /** Text */
+            text: string;
+            /** Owner */
+            owner?: string | null;
+        };
+        /** SkillOwnerRequest */
+        SkillOwnerRequest: {
+            /** Owner */
+            owner: string;
+        };
+        /** SkillProposeRequest */
+        SkillProposeRequest: {
+            /** Text */
+            text: string;
+            /** Supersedes */
+            supersedes?: string | null;
+            /**
+             * Scope
+             * @default team
+             * @enum {string}
+             */
+            scope: "team" | "universe";
+        };
+        /** SkillReviseRequest */
+        SkillReviseRequest: {
+            /** Text */
+            text: string;
         };
         /** SupersedeFactRequest */
         SupersedeFactRequest: {
@@ -1961,7 +2420,9 @@ export interface components {
              */
             rule_type: string;
             /** Situation */
-            situation?: Record<string, never>;
+            situation?: {
+                [key: string]: unknown;
+            };
             /** Approach */
             approach: string;
             /** Evidence */
@@ -1998,6 +2459,10 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
         };
         /** WorkingWrite */
         WorkingWrite: {
@@ -2813,7 +3278,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -2833,7 +3300,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -2998,6 +3467,347 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CodeChange"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    documents_list_v1_documents_get: {
+        parameters: {
+            query?: {
+                tag?: string | null;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    documents_search_v1_documents_search_get: {
+        parameters: {
+            query: {
+                q: string;
+                document?: string[] | null;
+                tag?: string | null;
+                limit?: number;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    documents_section_v1_documents__document_id__sections__section_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                document_id: string;
+                section_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    documents_figure_v1_documents__document_id__figures__figure_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                document_id: string;
+                figure_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    documents_promote_v1_documents__document_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skills_search_v1_skills_search_get: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: number;
+                agent?: string | null;
+                tag?: string | null;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skills_list_v1_skills_get: {
+        parameters: {
+            query?: {
+                agent?: string | null;
+                tag?: string | null;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skills_propose_v1_skills_propose_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillProposeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skills_get_v1_skills__name__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skills_promote_v1_skills__name__promote_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -3600,6 +4410,7 @@ export interface operations {
                 resolved?: string;
                 resolution?: string | null;
                 object_type?: string | null;
+                source_kind?: string | null;
                 cursor?: string | null;
                 limit?: number;
                 count?: boolean;
@@ -4724,6 +5535,614 @@ export interface operations {
             path: {
                 key_id: string;
                 team: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_list_documents_v1_admin_teams__team__documents_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_upload_document_v1_admin_teams__team__documents_post: {
+        parameters: {
+            query?: {
+                title?: string | null;
+                tags?: string | null;
+                filename?: string | null;
+                label?: string | null;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_upload_revision_v1_admin_teams__team__documents__document_id__revisions_post: {
+        parameters: {
+            query?: {
+                filename?: string | null;
+                label?: string | null;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_document_detail_v1_admin_teams__team__documents__document_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_retract_document_v1_admin_teams__team__documents__document_id__retract_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RetractDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_forget_document_preview_v1_admin_teams__team__documents__document_id__forget_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_forget_document_v1_admin_teams__team__documents__document_id__forget_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForgetDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_promote_document_v1_admin_teams__team__documents__document_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_list_skills_v1_admin_teams__team__skills_get: {
+        parameters: {
+            query?: {
+                include_retired?: boolean;
+            };
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_create_skill_v1_admin_teams__team__skills_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_skill_detail_v1_admin_teams__team__skills__name__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_skill_version_v1_admin_teams__team__skills__name__versions__version__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_revise_skill_v1_admin_teams__team__skills__name__revisions_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillReviseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_retire_skill_v1_admin_teams__team__skills__name__retire_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_restore_skill_v1_admin_teams__team__skills__name__restore_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_set_skill_owner_v1_admin_teams__team__skills__name__owner_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillOwnerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    admin_promote_skill_v1_admin_teams__team__skills__name__promote_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+            };
+            path: {
+                team: string;
+                name: string;
             };
             cookie?: never;
         };

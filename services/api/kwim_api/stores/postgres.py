@@ -12,7 +12,9 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from .pg_pool import cursor, open_pool
+from .pg_documents import PgDocumentStore
+from .pg_pool import cursor, is_uuid, open_pool
+from .pg_skills import PgSkillStore
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +27,7 @@ def _schema(team: str) -> str:
     return team
 
 
-class PostgresStore:
+class PostgresStore(PgDocumentStore, PgSkillStore):
     def __init__(self) -> None:
         self._pool: AsyncConnectionPool | None = None
 
@@ -198,17 +200,27 @@ class PostgresStore:
         async with cursor(self._pool) as cur:
             await cur.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
 
-    async def replay_commit_log(self, team: str) -> list[dict]:
-        """Read <team>.commit_log in seq order for replay.
+    async def replay_commit_log(
+        self, team: str, since_seq: int | None = None, until_seq: int | None = None,
+    ) -> list[dict]:
+        """Read <team>.commit_log in seq order for replay: rows with
+        since_seq < seq <= until_seq, either bound optional.
 
         Replay restores each node's created_at from `committed_at`.
         """
         s = _schema(team)
+        where, params = [], []
+        if since_seq is not None:
+            where.append("seq > %s"); params.append(since_seq)
+        if until_seq is not None:
+            where.append("seq <= %s"); params.append(until_seq)
+        clause = f"WHERE {' AND '.join(where)} " if where else ""
         async with cursor(self._pool, row_factory=dict_row) as cur:
             await cur.execute(
                 f"SELECT seq, committed_at, object_type, object_id, operation, payload, "
                 f"       provenance, proposed_by, source_kind, gate_decision "
-                f"FROM {s}.commit_log ORDER BY seq ASC"
+                f"FROM {s}.commit_log {clause}ORDER BY seq ASC",
+                params,
             )
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
@@ -494,6 +506,8 @@ class PostgresStore:
 
     async def get_pending(self, team: str, proposal_id: str) -> dict | None:
         s = _schema(team)
+        if not is_uuid(proposal_id):
+            return None
         async with cursor(self._pool, row_factory=dict_row) as cur:
             await cur.execute(
                 f"SELECT proposal_id, object_type, proposed_by, body, bus_message, "
@@ -510,8 +524,10 @@ class PostgresStore:
         resolved_via: str, reject_reason: str | None = None,
     ) -> dict | None:
         """Atomically resolve a pending proposal. Returns the claimed row, or None
-        if none matched (already resolved or unknown)."""
+        if none matched (already resolved, unknown, or not a UUID)."""
         s = _schema(team)
+        if not is_uuid(proposal_id):
+            return None
         async with cursor(self._pool, row_factory=dict_row) as cur:
             await cur.execute(
                 f"UPDATE {s}.pending_proposals "

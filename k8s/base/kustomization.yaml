@@ -6,8 +6,10 @@
 # network policies, GitOps automation) - layer those in your own kustomize overlay.
 #
 # What you must provide in your environment (the base only references them):
-#   - image registry + tags for `kwim-service` / `kwim-console` / `kwim-embedder`
-#     (kustomize `images:`)
+#   - image registry + tags for `kwim-service` / `kwim-console` / `kwim-embedder` /
+#     `kwim-docs-embedder` / `kwim-reranker` (kustomize `images:`)
+#   - a storage class and size for the `kwim-documents` PVC, if the cluster
+#     default does not suit
 #   - for a private registry, a pull Secret named `registry-credentials` in the
 #     namespace; every workload references it, and without it images are pulled
 #     anonymously (the kubelet logs a warning)
@@ -26,9 +28,12 @@ namespace: kwim
 resources:
   - 00-namespace.yaml
   - falkordb.yaml
+  - documents-pvc.yaml
   - kwim-service.yaml
   - kwim-console.yaml
   - embedder.yaml
+  - docs-embedder.yaml
+  - reranker.yaml
   - codegraph-extract-cronjob.yaml
 # Metadata-only labels
 labels:

@@ -45,8 +45,10 @@ spec:
                   key: value
             # k8s expands $(FALKORDB_PASSWORD) because it's declared earlier.
             # AOF persistence on; no eviction policy (see header).
+            # crash-memcheck-enabled no: after a crash, exit at once rather than
+            # hang in the crash report's memory test, so the pod is restarted.
             - name: REDIS_ARGS
-              value: "--requirepass $(FALKORDB_PASSWORD) --appendonly yes --appendfsync everysec"
+              value: "--requirepass $(FALKORDB_PASSWORD) --appendonly yes --appendfsync everysec --crash-memcheck-enabled no"
           ports:
             - name: redis
               containerPort: 6379
@@ -61,17 +63,19 @@ spec:
             limits:
               memory: "2Gi"
               cpu: "1000m"
+          # PING, not a TCP check: a hung server still accepts connections.
           livenessProbe:
-            tcpSocket:
-              port: 6379
+            exec:
+              command: ["sh", "-c", 'REDISCLI_AUTH="$FALKORDB_PASSWORD" timeout 4 redis-cli ping | grep -q PONG']
             initialDelaySeconds: 15
             periodSeconds: 15
             timeoutSeconds: 5
           readinessProbe:
-            tcpSocket:
-              port: 6379
+            exec:
+              command: ["sh", "-c", 'REDISCLI_AUTH="$FALKORDB_PASSWORD" timeout 4 redis-cli ping | grep -q PONG']
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 6
   volumeClaimTemplates:
     - metadata:

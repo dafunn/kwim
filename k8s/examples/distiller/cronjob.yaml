@@ -46,9 +46,11 @@ spec:
                 # Your OpenAI-compatible model gateway, e.g. LiteLLM.
                 - { name: LITELLM_BASE_URL, value: "http://<model-gateway>:4000/v1" }
                 - { name: DISTILLER_MODEL, value: "<model-name>" }
-                # Optional: events read per run (default 500), and an OTLP
-                # collector for traces.
+                # Optional: events read per run (default 500), the distinct
+                # events a fact must cite (default 2), and an OTLP collector
+                # for traces.
                 # - { name: DISTILLER_WINDOW_LIMIT, value: "500" }
+                # - { name: DISTILLER_MIN_FACT_TURNS, value: "2" }
                 # - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://<collector>:4317" }
               volumeMounts:
                 - { name: secrets, mountPath: /secrets, readOnly: true }

@@ -134,7 +134,8 @@ The order matters: each step provisions substrate the next depends on.
      too. With the default `externalTrafficPolicy: Cluster` it must admit the
      cluster's pod CIDR as well as the agents' addresses, or the NodePort
      answers only through the node running kwim-service; its header explains
-     the choice between that and `externalTrafficPolicy: Local`.
+     the choice between that and `externalTrafficPolicy: Local`. The review
+     surface (step 12) needs `review-surface.yaml`.
    - the distiller, which runs as one CronJob per team (step 9)
 7. **Operator key.** Provision a seed/promote-capable API key for a team; its id-prefix
    goes into `promote-keys`, which gates `/wisdom/promote`, `/wisdom/seed`, and review.
@@ -156,6 +157,10 @@ The order matters: each step provisions substrate the next depends on.
    Every fact it proposes waits for review (`GET /v1/review/pending`, or the
    console's Proposals tab) unless you set `KWIM_GATE_REVIEW_DISTILLED_FACTS=false`
    on kwim-service; see `DESIGN.md`, "Distilled facts are reviewed".
+   The distiller discards a fact that cites fewer than `DISTILLER_MIN_FACT_TURNS`
+   distinct events (default 2), so one turn's tool output is never proposed as a
+   fact. An agent that records one event per turn makes this a count of turns.
+   Advisories are not held to it.
 10. **(Optional) seed initial knowledge** for a team via the Knowledge/Wisdom API.
 11. **(Optional) the code graph.** Set `REPOS` in `k8s/base/codegraph-extract-cronjob.yaml`
    as `name=owner/repo` pairs where the name is also the team the repo distills into
@@ -164,7 +169,15 @@ The order matters: each step provisions substrate the next depends on.
    the CronJob template. See `docs/operations.md` -> "add a repo".
 12. **(Optional) the review surface.** Provide `mm-webhook-url` + `mm-action-secret`; the
     service then posts every proposal to a Mattermost channel with Approve / Reject / Forget
-    buttons.
+    buttons, and every auto-committed object with Confirm / Retract / Forget. Two more
+    things make it work end to end:
+    - **Mattermost must reach the buttons' URL.** Each button calls
+      `$KWIM_SERVICE_URL/v1/review/mm-action` (or `/committed-action`). The base sets
+      `KWIM_SERVICE_URL` to `http://kwim-service:8000`, which resolves only inside the
+      cluster; set it in your overlay to the URL your ingress serves kwim-service at.
+    - **kwim-service must reach the webhook.** With the example network policies, add
+      `review-surface.yaml` with Mattermost's address. A post that cannot be delivered is
+      logged and not retried.
 
 ## Verify
 
@@ -182,6 +195,33 @@ The order matters: each step provisions substrate the next depends on.
 
 Apply the new `k8s/base` through your overlay as in step 6, after any schema
 step the release changes (step 5 for `db/admin-schema.sql`).
+
+### Adding document support
+
+- Re-apply `db/team-schema.sql.j2` to every existing team and to `universe`; it adds
+  the document tables and lets `commit_log` record documents.
+- The base adds a `kwim-documents` PersistentVolumeClaim (10Gi, ReadWriteOnce)
+  mounted into kwim-service. Set its size and storage class in your overlay, and
+  include it in your backups.
+- The base runs a document embedder (`docs-embedder`, image `kwim-docs-embedder`,
+  `BAAI/bge-small-en-v1.5`) and a reranker (`reranker`, image `kwim-reranker`,
+  `cross-encoder/ms-marco-MiniLM-L6-v2`), both TEI on CPU, and points
+  kwim-service at them with `KWIM_DOCS_EMBEDDER_URL` and `KWIM_DOCS_RERANKER_URL`.
+  Build the images with `services/api/Dockerfile.tei`; the Deployment's
+  `--model-id` names the model directory. To use another embedder, set
+  `documents.embedder.dim` to its dimension. Unset either URL to run without it:
+  without the embedder document search is full-text only, and without the
+  reranker results keep their fused order.
+- Neither model pod has a CPU limit: under a CFS quota TEI's ONNX Runtime sizes
+  its thread pool from the node's cores, not the quota, and runs about 4x
+  slower.
+
+### Adding skills
+
+- Re-apply `db/team-schema.sql.j2` to every existing team and to `universe`; it adds
+  the skills tables and lets `commit_log` and the review queue hold skills.
+- Skill search uses the document embedder (`KWIM_DOCS_EMBEDDER_URL`). Without it,
+  search is full-text only.
 
 ### From v0.3
 

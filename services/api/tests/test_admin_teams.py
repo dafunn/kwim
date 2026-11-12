@@ -106,6 +106,9 @@ class FakePgStore(_BaseFakePgStore):
         self.calls.append(("destroy_team_preflight", team))
         return {"role": "kwim_user", "can_drop": self.destroy_preflight_ok}
 
+    async def count_documents(self, team):
+        return {"documents": 0, "bytes": 0}
+
     async def apply_team_schema(self, rendered_sql, *, team=None):
         self.calls.append(("apply_team_schema", team))
         if self.apply_error is not None:
@@ -162,7 +165,8 @@ class FakeFalkorStore(_BaseFakeFalkorStore):
     async def drop_team_graphs(self, team):
         self.calls.append(("drop_team_graphs", team))
         self.dropped_graphs.append(team)
-        return {f"kwim_{team}": True, f"kwim_{team}_code": False}
+        return {f"kwim_{team}": True, f"kwim_{team}_code": False,
+                f"kwim_{team}_docs": False}
 
 
 # ---------------------------------------------------------------------------

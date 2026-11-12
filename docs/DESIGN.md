@@ -114,7 +114,7 @@ commits them, rejects them, or routes them to a human.
   replay depend on operation order. An object that is not live is refused, since
   amending a superseded version would edit history the chain has moved past.
   The row's `previous_payload` holds only the replaced fields, and `reason`
-  records why, so what changed, who changed it and why stay together in the log.
+  records why, so what changed, who changed it, and why stay together in the log.
   The node's `commit_seq` moves to the amending row.
 - **Promoted keys are kept in step.** Rule situations and semantic metadata are
   copied onto node properties so queries can filter on them. When an amend
@@ -147,7 +147,7 @@ it and nothing else, leaving no tombstone for a rebuild to restore.
 
 ### Preview and confirm in the console
 
-Forget, bulk reject and team destroy are previewed first. The preview returns a
+Forget, bulk reject, and team destroy are previewed first. The preview returns a
 token, stored with a five-minute TTL and consumed with `GETDEL`, so it is
 single-use and a failed confirmation still uses it up.
 
@@ -326,7 +326,7 @@ a shared secret embedded in the button, and answer 403 when
 - **Rebuild jobs** are rows in `kwim_admin.jobs`, at most one running per team
   and kind. A job left running when the service restarts is marked failed at
   startup.
-- **One replica.** The login counters, the key cache and job tracking are
+- **One replica.** The login counters, the key cache, and job tracking are
   in-process, which is correct only while kwim-service runs one replica. Preview
   tokens are in FalkorDB and would survive a second replica.
 
@@ -356,7 +356,7 @@ a shared secret embedded in the button, and answer 403 when
 
 - **Separate graph, stable ids.** Each team's code graph is `kwim_<team>_code`.
   Node ids are qualified names (`repo:path::qualified.name`), so re-extraction
-  updates nodes in place. The graph holds structure, signatures, summaries and
+  updates nodes in place. The graph holds structure, signatures, summaries, and
   embeddings, never file bodies.
 - **Incremental.** Files whose xxh3 hash matches the graph are not re-extracted,
   but every file is parsed so calls across files still resolve. Files that
@@ -376,6 +376,111 @@ a shared secret embedded in the button, and answer 403 when
   answered by the `/v1/code` reads instead.
 - **Reads are recorded.** Each `/v1/code` read lands in episodic memory, so what
   an agent looked at is part of the record.
+
+## Documents
+
+- **One governed object per document.** Upload, new revision, retraction, and
+  promotion are commit-log rows (`object_type` `document`). Sections, chunks, and
+  figures are derived data: running thousands of chunks through the gate would
+  add review noise without adding governance.
+- **Operators ingest; agents read.** Only `/v1/admin` creates a document or a
+  revision. Team keys can search, read sections and figures, and promote.
+- **Postgres is enough to rebuild.** The original files and figure images are on
+  a volume, addressed by sha256, written once and never modified; an identical
+  upload is stored once. Each revision's extraction is stored in Postgres, so
+  the documents graph rebuilds from Postgres alone. Only re-extraction reads the
+  files.
+- **A separate graph and model.** Chunks live in `kwim_<team>_docs` with their own
+  vector index and embedding model (bge-small, `documents.embedder.dim`), so a
+  change of document model rebuilds only the documents graphs, as with the code
+  graph. Facts and semantic items stay on all-MiniLM-L6-v2, which reads only 256
+  tokens and would embed a long manual from its first page only.
+- **One intermediate format.** Every extractor emits the same tree of sections,
+  blocks (paragraph, step, list, table, warning, caution, note, figure reference,
+  code), and figures. Chunking and everything after it read only that format, so
+  extractors can change without touching the rest.
+- **Chunks follow the structure.** A chunk is a run of blocks within one section,
+  up to `documents.chunk_target_tokens` and never past
+  `documents.chunk_max_tokens`. A step, table, or warning is never split, except
+  that an oversized table is split by rows with its header repeated. The text
+  embedded starts with the document title and section path; the stored text
+  does not.
+- **Hybrid search, then whole sections.** Embeddings handle meaning and
+  full-text handles exact identifiers such as part numbers, so both run and are
+  fused by reciprocal rank. A cross-encoder reranker rescores the fused
+  candidates when configured. Each hit is expanded to the section containing it,
+  because an agent needs the whole procedure with its warnings; a section over
+  `documents.search.max_section_tokens` returns the hit and its neighbours
+  instead.
+- **The vector index searches wide.** It is created with `efRuntime` 200. At
+  FalkorDB's default of 10, a search among hundreds of similar chunks returned
+  unrelated chunks while the right one was only found with a much larger k.
+- **Only the current revision is searched.** Older revisions stay in Postgres,
+  up to `documents.max_revisions` per document.
+- **Promotion copies.** A promoted document gets a universe copy with its own
+  log row, sharing the same files and extraction. Search returns one of the two,
+  as it does for promoted rules.
+- **Retract keeps, forget deletes.** Retract removes a document from search and
+  keeps its rows and files. Forget removes the nodes, rows, log rows, and every
+  file no other document uses, behind the same preview and confirm flow as other
+  forgets.
+- **Coverage is reported.** A search says whether vector search and reranking ran,
+  so a degraded search is visible rather than silently worse.
+
+## Skills
+
+- **Agents look skills up each turn.** A search on the turn's request returns
+  names and descriptions; a second call loads the body of the one the agent
+  follows. Skills are not part of `memory/context`, which is called once per
+  session and keyed on a subject tag, not on the request.
+- **Unavailable is not empty.** When KWIM is unreachable, the client reports that
+  skills are unavailable and why, rather than returning no results, so an agent
+  can say it is working without skills instead of concluding none apply.
+- **Humans commit, agents propose.** An operator's skill or revision commits
+  directly and is audited, like other admin edits. An agent's proposal always
+  goes to review: a new skill or a team revision to the team's queue, a revision
+  of a universe skill to the universe's.
+- **Every version is kept.** A skill is a row in `skills` and one row per version
+  in `skill_versions`; a revision adds a version and never overwrites one.
+  Retire hides a skill and restore brings it back. Each new skill, version,
+  retirement, restoration, and promotion is a commit-log row (`object_type`
+  `skill`); an owner change is recorded in the admin audit log.
+- **Postgres only, no graph.** Skills number in the tens to hundreds, so search
+  reads every current skill of the team and the universe from Postgres and ranks
+  them in the service. There is nothing to keep in step and nothing to rebuild.
+- **Ranked by similarity to the whole skill.** Each version is embedded as its
+  name, description, and body together with the document embedder, and search
+  ranks by cosine similarity to the request. That ranked best in evaluation:
+  better than embedding only the name and description, better than fusing in
+  full-text ranking, and better than the reranker. Full-text ranking is used only
+  when the embedder is unavailable, and the result says so.
+- **The floor prefers near misses.** Only skills at or above
+  `skills.search.min_similarity` are returned. No floor separated "a skill
+  applies" from "no skill applies" in evaluation, so the default (0.55) keeps
+  every expected skill and sometimes returns one that does not apply; the agent
+  reads it and rejects it.
+- **The more specific skill wins.** Names are unique within a scope, and a team
+  skill hides a universe skill of the same name, in search and in a load.
+- **Persona is a filter.** A skill's `agents` lists the personas it is for; a
+  search with `agent` leaves out skills meant only for others. An empty list
+  means every persona.
+- **A skill names its route.** A skill says which tool or playbook does the work;
+  those files stay in git and the skill refers to them as `owner/repo:path`. KWIM
+  stores only the instructions and never runs anything.
+- **One file per skill.** A skill is one SKILL.md, frontmatter and body, within
+  `skills.max_chars`. Skills that bundle reference documents, scripts, or templates
+  in their directory are not supported in this release: those files are not
+  stored, and the import tool reads only the SKILL.md.
+- **No credentials in skills.** Every write is refused if the text holds a
+  credential-shaped value (a private key, an encrypted secrets file, an assigned
+  password or token, a bearer token, credentials in a URL, or a long encoded or
+  hex value). The error names the kind of finding, never the value.
+- **Owners and pending revisions.** Every skill has an owner, an operator account,
+  named in review messages. When a revision is waiting for review, search and
+  load say so, while the agent still receives the approved version.
+- **Promotion.** Promotion copies a team skill into the universe. If the universe
+  already has the name, a team key's promotion waits for an operator, who
+  decides whether it becomes the universe skill's next version.
 
 ## The client and the distiller
 
@@ -397,12 +502,19 @@ a shared secret embedded in the button, and answer 403 when
   references, which models repeat reliably, and mapped back to event ids. A
   candidate with no resolvable evidence is dropped.
 
-## The embedder image
+## The embedder images
 
 The model is copied into the TEI image at build time, and the container runs
 with `HF_HUB_OFFLINE=1`, so the pod needs no access to the Hugging Face Hub.
 Changing the model's dimension (384) means changing `embedder.dim` and rebuilding
 every graph, since the vector indexes are created at that size.
+
+The document embedder and the reranker are built the same way from
+`Dockerfile.tei`, each its own Deployment behind its own URL, so either can move
+to other hardware by changing a URL. Changing the document model's dimension
+means changing `documents.embedder.dim` and rebuilding the documents graphs.
+Neither has a CPU limit: under a CFS quota TEI's ONNX Runtime sizes its thread
+pool from the node's cores, not the quota, and runs several times slower.
 
 ## The admin console
 

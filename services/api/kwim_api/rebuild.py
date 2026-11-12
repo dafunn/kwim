@@ -17,7 +17,7 @@ import sys
 from .config import settings
 from .embedder import Embedder
 from .freshness import _to_dt
-from .stores.falkor import FalkorStore, _graph_name
+from .stores.falkor import FalkorStore, _graph_name, live_graph_lock
 from .stores.postgres import PostgresStore
 
 # Batch size for embedder calls during re-embed (rebuild.embed_batch, env-overridable).
@@ -41,11 +41,13 @@ async def _replay_commit(
     team: str,
     graph_name: str | None,
     embedder: "Embedder | None" = None,
+    rows: list[dict] | None = None,
 ) -> None:
     """Replay <team>.commit_log into the target graph in seq order, restoring each
     node's created_at from committed_at. With `embedder`, facts and logged semantic
-    items are embedded."""
-    rows = await pg.replay_commit_log(team)
+    items are embedded. `rows` replays only those (a range read by the caller)."""
+    if rows is None:
+        rows = await pg.replay_commit_log(team)
     for row in rows:
         obj_type = row["object_type"]
         op = row["operation"]
@@ -61,6 +63,10 @@ async def _replay_commit(
         if isinstance(provenance, str):
             provenance = json.loads(provenance)
 
+        if obj_type in ("document", "skill"):
+            # Documents are projected into kwim_<team>_docs and skills are read
+            # from Postgres; neither is in the team graph.
+            continue
         if obj_type == "fact" and op == "commit":
             fact = {**payload, "id": obj_id, "commit_seq": seq}
             embedding: list[float] | None = None
@@ -229,27 +235,58 @@ async def _verify_temp_graph(
         return False
 
 
+class SwapUnsupported(Exception):
+    """This FalkorDB has no GRAPH.COPY."""
+
+
 async def _swap_graphs(falkor: FalkorStore, team: str) -> bool:
-    """Attempt GRAPH.COPY-based swap. Returns False if the primitive is unavailable."""
+    """Make the temp graph the live one, under the team's live-graph lock so no
+    query in this process lands between the delete and the copy: copy live to a
+    backup, delete live, copy temp onto its name. If that copy fails, the backup
+    is copied back, so the live graph is never left missing; the temp graph is
+    kept for another try. Raises SwapUnsupported when GRAPH.COPY does not exist."""
     live = _graph_name(team)
     temp = f"{live}_rebuild"
+    backup = f"{live}_prerebuild"
     conn = falkor._db.connection
-    try:
-        await conn.execute_command("GRAPH.DELETE", live)
-        await conn.execute_command("GRAPH.COPY", temp, live)
-        await conn.execute_command("GRAPH.DELETE", temp)
-        return True
-    except Exception as exc:
-        # Remove the temp graph before falling back.
+    async with live_graph_lock(team):
+        await _delete_graph(conn, backup)
         try:
-            await conn.execute_command("GRAPH.DELETE", temp)
-        except Exception:
-            pass
-        print(
-            f"  GRAPH.COPY swap failed ({exc}); falling back to in-place clear+replay",
-            file=sys.stderr,
-        )
-        return False
+            await conn.execute_command("GRAPH.COPY", live, backup)
+        except Exception as exc:
+            if "unknown command" in str(exc).lower():
+                raise SwapUnsupported(str(exc)) from exc
+            if "empty key" not in str(exc).lower():   # no live graph yet: nothing to back up
+                print(f"  could not back up {live} ({exc}); live graph untouched", file=sys.stderr)
+                return False
+        try:
+            await _delete_graph(conn, live)
+            await conn.execute_command("GRAPH.COPY", temp, live)
+        except Exception as exc:
+            print(f"  GRAPH.COPY swap failed ({exc}); restoring {live} from {backup}", file=sys.stderr)
+            try:
+                await _delete_graph(conn, live)
+                await conn.execute_command("GRAPH.COPY", backup, live)
+            except Exception as exc2:
+                print(f"  RESTORE FAILED ({exc2}); the previous graph is kept as {backup}",
+                      file=sys.stderr)
+                return False
+            await _delete_graph(conn, backup)
+            return False
+        falkor._inited.discard(live)
+        await _delete_graph(conn, temp)
+        await _delete_graph(conn, backup)
+        return True
+
+
+async def _delete_graph(conn, name: str) -> None:
+    """GRAPH.DELETE that treats a missing graph as done."""
+    try:
+        await conn.execute_command("GRAPH.DELETE", name)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if not ("empty key" in msg or "not exist" in msg or "unknown graph" in msg):
+            raise
 
 
 async def _clear_live_graph(falkor: FalkorStore, team: str) -> None:
@@ -287,11 +324,18 @@ async def rebuild_team(
     if not in_place:
         graph_name = f"kwim_{team}_rebuild"
         print(f"  Temp graph: {graph_name}")
+        # A temp graph left by an earlier rebuild that did not finish.
+        await _delete_graph(falkor._db.connection, graph_name)
+
+    # The commit_log as of now. Rows committed while the rebuild runs are caught
+    # up after the swap, so a team that keeps taking writes still converges.
+    rows = await pg.replay_commit_log(team)
+    snapshot_seq = rows[-1]["seq"] if rows else 0
 
     # Replay commit_log (fact embedding included when embedder present).
-    print("  Replaying commit_log...")
+    print(f"  Replaying commit_log (through seq {snapshot_seq})...")
     try:
-        await _replay_commit(pg, falkor, team, graph_name, embedder)
+        await _replay_commit(pg, falkor, team, graph_name, embedder, rows=rows)
     except Exception as exc:
         print(f"  FAILED during commit replay: {exc}", file=sys.stderr)
         return False
@@ -315,30 +359,50 @@ async def rebuild_team(
 
     # Swap (if temp graph).
     if not in_place:
-        commit_rows = await pg.replay_commit_log(team)
-        expected_min = len({r["object_id"] for r in commit_rows})
+        expected_min = len({r["object_id"] for r in rows
+                            if r["object_type"] not in ("document", "skill")})
         print(f"  Verifying temp graph (expect >= {expected_min} nodes)...")
         if not await _verify_temp_graph(falkor, team, expected_min):
             print("  FAILED (temp graph sanity). Live graph untouched.", file=sys.stderr)
             return False
 
         print("  Swapping temp -> live...")
-        swapped = await _swap_graphs(falkor, team)
-        if not swapped:
-            print("  Falling back to in-place clear + replay into live graph...")
+        try:
+            swapped = await _swap_graphs(falkor, team)
+        except SwapUnsupported as exc:
+            # No GRAPH.COPY: rebuild the live graph in place instead.
+            print(f"  GRAPH.COPY unavailable ({exc}); clearing and replaying the live graph...")
+            await _delete_graph(falkor._db.connection, graph_name)
             await _clear_live_graph(falkor, team)
             try:
-                await _replay_commit(pg, falkor, team, None, embedder)
+                await _replay_commit(pg, falkor, team, None, embedder, rows=rows)
                 await _apply_verifications(pg, falkor, team, None)
-            except Exception as exc:
-                print(f"  FAILED during fallback replay: {exc}", file=sys.stderr)
+            except Exception as exc2:
+                print(f"  FAILED during in-place replay: {exc2}", file=sys.stderr)
                 return False
             if embedder:
                 try:
                     await _rebuild_semantic(pg, falkor, embedder, team, None)
-                except Exception as exc:
-                    print(f"  FAILED during fallback semantic re-embed: {exc}", file=sys.stderr)
+                except Exception as exc2:
+                    print(f"  FAILED during in-place semantic re-embed: {exc2}", file=sys.stderr)
                     return False
+            swapped = True
+        if not swapped:
+            print(f"  FAILED: could not swap; the rebuilt graph is kept as {graph_name}.",
+                  file=sys.stderr)
+            return False
+
+        # Catch up rows committed since the snapshot, into the live graph.
+        for _ in range(10):
+            newer = await pg.replay_commit_log(team, since_seq=snapshot_seq)
+            if not newer:
+                break
+            print(f"  Catching up {len(newer)} row(s) committed during the rebuild...")
+            await _replay_commit(pg, falkor, team, None, embedder, rows=newer)
+            snapshot_seq = newer[-1]["seq"]
+        else:
+            print("  WARNING: still catching up after 10 rounds; later rows land through the gate",
+                  file=sys.stderr)
 
     print(f"  [{team}] OK")
     return True

@@ -72,6 +72,8 @@ export function Proposals() {
   const { team = "" } = useParams<{ team: string }>();
   const [filters, setFilters] = useState<ProposalFilters>({ resolved: "false" });
   const [draft, setDraft] = useState<ProposalFilters>({ resolved: "false" });
+  const [owner, setOwner] = useState("");
+  const [ownerDraft, setOwnerDraft] = useState("");
 
   const { items, isLoading, error, hasNextPage, isFetchingNextPage, fetchNextPage } = useCursorList<Proposal>(
     ["admin", "teams", team, "proposals", filters],
@@ -79,6 +81,8 @@ export function Proposals() {
   );
 
   const showResolution = filters.resolved !== "false";
+  // A skill proposal carries its skill's owner; the owner filter shows only those.
+  const shown = owner ? items.filter((p) => (p.body as { owner?: string | null }).owner === owner) : items;
 
   const columns: Column<Proposal>[] = [
     { key: "summary", header: "Summary", render: (p) => p.summary },
@@ -108,6 +112,7 @@ export function Proposals() {
         onSubmit={(e) => {
           e.preventDefault();
           setFilters(draft);
+          setOwner(ownerDraft.trim());
         }}
       >
         <div className={styles.filterField}>
@@ -132,14 +137,19 @@ export function Proposals() {
             <option value="">any</option>
             <option value="fact">fact</option>
             <option value="rule">rule</option>
+            <option value="skill">skill</option>
           </select>
+        </div>
+        <div className={styles.filterField}>
+          <label htmlFor="prop-owner">Skill owner</label>
+          <input id="prop-owner" value={ownerDraft} onChange={(e) => setOwnerDraft(e.target.value)} />
         </div>
         <button type="submit">Apply</button>
       </form>
 
       {isLoading && <p>Loading proposals...</p>}
       {error && <ErrorNotice error={error} />}
-      <DataTable columns={columns} rows={items} getRowKey={(p) => p.proposal_id} emptyMessage="No proposals." />
+      <DataTable columns={columns} rows={shown} getRowKey={(p) => p.proposal_id} emptyMessage="No proposals." />
       <LoadMore hasNextPage={hasNextPage} isFetchingNextPage={isFetchingNextPage} onClick={() => fetchNextPage()} />
     </div>
   );

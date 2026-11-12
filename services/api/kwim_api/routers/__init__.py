@@ -2,14 +2,18 @@
 the surface name, which would shadow the submodule of the same name.
 """
 from .admin import router as admin_router
+from .admin_documents import router as admin_documents_router
 from .admin_read import router as admin_read_router
+from .admin_skills import router as admin_skills_router
 from .admin_teams import router as admin_teams_router
 from .admin_write import router as admin_write_router
 from .code import router as code_router
+from .documents import router as documents_router
 from .knowledge import router as knowledge_router
 from .memory import router as memory_router
 from .proposals import router as proposals_router
 from .review import router as review_router
+from .skills import router as skills_router
 from .wisdom import router as wisdom_router
 
 # Mount order.
@@ -20,8 +24,12 @@ ALL_ROUTERS = (
     proposals_router,
     review_router,
     code_router,
+    documents_router,
+    skills_router,
     admin_router,
     admin_read_router,
     admin_write_router,
     admin_teams_router,
+    admin_documents_router,
+    admin_skills_router,
 )

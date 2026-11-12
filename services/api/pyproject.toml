@@ -26,6 +26,10 @@ dependencies = [
     "xxhash==4.0.1",                       # xxh3 content hashing for incremental re-index
     "networkx==3.7",                       # Louvain community detection (worker-only, not request path)
     "pathspec==1.1.1",                     # .gitignore/.cgignore matching for discovery
+    # Document extraction - kwim_api/documents/
+    "pdfplumber==0.11.10",                 # PDF text, fonts, tables (pdfminer.six)
+    "pypdfium2==5.14.0",                   # PDF page rendering for figure crops
+    "markdown-it-py==4.2.0",               # Markdown parsing
 ]
 
 [project.optional-dependencies]
@@ -35,4 +39,5 @@ dev = [
     "pytest-asyncio==1.4.0",
     "pytest-timeout==2.4.0",
     "ruff==0.17.0",                        # lint; config in ruff.toml at the repo root
+    "reportlab==5.0.1",                    # builds PDF fixtures in the document tests
 ]

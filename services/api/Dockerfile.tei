@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+# TEI CPU image with one model baked in, for the document embedder and the
+# reranker. The Deployment's args name the model directory (--model-id).
+#
+#   docker build -f services/api/Dockerfile.tei \
+#     --build-arg MODEL_REPO=BAAI/bge-small-en-v1.5 \
+#     --build-arg MODEL_REVISION=5c38ec7c405ec4b44b94cc5a9bb96e735b38267a \
+#     -t kwim-docs-embedder services/api
+#   docker build -f services/api/Dockerfile.tei \
+#     --build-arg MODEL_REPO=cross-encoder/ms-marco-MiniLM-L6-v2 \
+#     --build-arg MODEL_REVISION=233902d25c440f23af6f7d6e94d2946bac0bee0a \
+#     -t kwim-reranker services/api
+#
+# The model is stored at /models/<last part of MODEL_REPO>.
+
+# --- Stage 1: download the model (build-time only) ---
+FROM docker.io/library/python:3.14-slim AS downloader
+ARG MODEL_REPO
+ARG MODEL_REVISION
+RUN pip install --no-cache-dir huggingface-hub==2.2.0
+ENV HF_HUB_DOWNLOAD_TIMEOUT=60
+# Only the files TEI reads; the ONNX weights because its CPU image runs the
+# ONNX backend. Retried so a transient CDN timeout does not fail the build.
+RUN : "${MODEL_REPO:?set MODEL_REPO}" "${MODEL_REVISION:?set MODEL_REVISION}"; \
+    for attempt in 1 2 3; do \
+        python -c "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir='/models/' + sys.argv[1].split('/')[-1], allow_patterns=['config.json', 'tokenizer.json', 'sentence_bert_config.json', '1_Pooling/config.json', 'onnx/model.onnx'])" "${MODEL_REPO}" "${MODEL_REVISION}" \
+            && rm -rf /models/*/.cache && exit 0; \
+        echo "model download attempt ${attempt} failed; retrying in 5s..." >&2; \
+        sleep 5; \
+    done; \
+    echo "model download failed after 3 attempts" >&2; \
+    exit 1
+
+# --- Stage 2: TEI runtime with the model baked in ---
+FROM ghcr.io/huggingface/text-embeddings-inference:cpu-1.5@sha256:0502794a4d86974839e701dadd6d06e693ec78a0f6e87f68c391e88c52154f3f
+
+# No Hugging Face Hub access at run time; the model is local.
+ENV HF_HUB_OFFLINE=1
+
+# The model files, owned by the TEI runtime user (uid 1000).
+COPY --from=downloader --chown=1000:1000 /models /models
+
+USER 1000

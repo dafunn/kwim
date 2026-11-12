@@ -1,0 +1,18 @@
+---
+# Documents volume: uploaded originals, rendered pages and figures, addressed by
+# sha256. Mounted into kwim-service at /data/documents. Back it up with Postgres;
+# the document rows there refer to these files. ReadWriteOnce suits kwim-service's
+# single replica. Set storageClassName and size in your overlay.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kwim-documents
+  namespace: kwim
+  labels:
+    app.kubernetes.io/name: kwim-documents
+    app.kubernetes.io/part-of: kwim
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi

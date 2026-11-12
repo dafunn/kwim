@@ -49,6 +49,7 @@ retrieval:
 
 rebuild:
   embed_batch: 32               # episodic re-embed batch size during rebuild
+  timeout_s: 1800               # an admin rebuild job running longer is cancelled and failed
 
 admin:
   # Hard off switch for the whole /v1/admin surface (KWIM_ADMIN_ENABLED).
@@ -66,6 +67,36 @@ admin:
   # KWIM_ADMIN_ALLOW_TEAM_DESTROY).
   allow_team_create: true
   allow_team_destroy: false
+
+documents:
+  storage_path: /data/documents # the documents volume, mounted into kwim-service
+  max_upload_mb: 100            # upload size cap per file
+  max_revisions: 50             # revisions kept per document; the oldest is removed past this
+  allowed_types:                # Content-Type values accepted for upload
+    - application/pdf
+    - text/markdown
+  chunk_target_tokens: 300      # chunks fill up to about this many tokens
+  chunk_max_tokens: 400         # a chunk never exceeds this; larger blocks are split
+  chars_per_token: 3.5          # token estimate for chunk sizing (characters per token)
+  embedder:                     # URL from KWIM_DOCS_EMBEDDER_URL; unset means no vectors
+    dim: 384                    # must match the document embedding model
+    timeout_s: 60.0
+    max_batch: 32               # inputs per /embed request
+  reranker:                     # URL from KWIM_DOCS_RERANKER_URL; unset means no reranking
+    candidates: 40              # fused chunks the reranker rescores
+    max_batch: 32               # texts per /rerank request (TEI's --max-client-batch-size)
+    timeout_s: 30.0
+  search:
+    vector_k: 50                # chunks taken from vector search before fusion
+    fulltext_k: 50              # chunks taken from full-text search before fusion
+    rrf_k: 60                   # reciprocal rank fusion constant
+    max_section_tokens: 2000    # a larger section returns the hit's neighbourhood instead
+
+skills:
+  max_chars: 8192               # a whole SKILL.md, frontmatter included
+  search:
+    limit: 5                    # skills a search returns by default
+    min_similarity: 0.55        # a skill is returned only at or above this cosine similarity
 
 messaging:
   rmq_exchange: kwim            # RabbitMQ topic exchange name

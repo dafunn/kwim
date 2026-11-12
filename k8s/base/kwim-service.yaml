@@ -27,6 +27,8 @@ spec:
       # warning and pulls anonymously, so a public registry needs nothing.
       imagePullSecrets: [{ name: registry-credentials }]
       volumes:
+        - name: documents
+          persistentVolumeClaim: { claimName: kwim-documents }
         - name: secrets
           projected:
             sources:
@@ -67,6 +69,8 @@ spec:
             - { name: KWIM_RMQ_USER,    value: "kwim" }
             - { name: KWIM_RMQ_VHOST,   value: "/kwim" }
             - { name: KWIM_EMBEDDER_URL, value: "http://embedder:80" }
+            - { name: KWIM_DOCS_EMBEDDER_URL, value: "http://docs-embedder:80" }
+            - { name: KWIM_DOCS_RERANKER_URL, value: "http://reranker:80" }
             # KWIM_PROMOTE_KEYS / KWIM_REVIEW_KEYS are exported by with-secrets.sh
             # from the mounted /secrets/promote-keys file - never hardcoded here.
             - { name: KWIM_SERVICE_URL, value: "http://kwim-service:8000" }
@@ -80,6 +84,8 @@ spec:
             - name: secrets
               mountPath: /secrets
               readOnly: true
+            - name: documents
+              mountPath: /data/documents
           readinessProbe:
             httpGet: { path: /health, port: 8000 }
             initialDelaySeconds: 5

@@ -11,6 +11,8 @@ from fastapi import FastAPI
 
 from . import otel
 from .admin_auth import warn_if_insecure_cookie
+from .documents.ingest import document_embedder
+from .documents.rerank import document_reranker
 from .embedder import Embedder
 from .gate import Gate
 from .routers import ALL_ROUTERS
@@ -30,6 +32,8 @@ async def lifespan(app: FastAPI):
     State.falkor = FalkorStore()
     State.bus = Bus()
     State.embedder = Embedder()
+    State.docs_embedder = document_embedder()
+    State.docs_reranker = document_reranker()
     State.admin = AdminStore()
     await State.pg.connect()
     await State.falkor.connect()
@@ -60,6 +64,10 @@ async def lifespan(app: FastAPI):
         await State.falkor.close()
         await State.pg.close()
         await State.embedder.close()
+        if State.docs_embedder is not None:
+            await State.docs_embedder.close()
+        if State.docs_reranker is not None:
+            await State.docs_reranker.close()
         await State.admin.close()
 
 

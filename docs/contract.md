@@ -112,6 +112,90 @@ GET  /v1/memory/working/{session}/{key}     working-memory read   -> { value } |
 PUT  /v1/memory/working/{session}/{key}     working-memory write  body: { value, ttl_seconds? }
 ```
 
+### Documents
+Manuals and references uploaded by operators (through `/v1/admin`), searched by
+section. Every read covers the team's documents and the universe's. Search
+returns a promoted team document once, as its universe copy; the list returns
+both, with promoted_to set on the team copy.
+```
+GET  /v1/documents                  the searchable documents
+       ?tag=
+       -> { items: [ {id, title, tags, revision_number, mime_type, page_count,
+                      scope:"team"|"universe", promoted_to} ] }
+
+GET  /v1/documents/search           sections that answer a question, best first
+       ?q=<text> &limit=5 (1..20) &document=<id> (repeatable) &tag=
+       -> { results: [ {document_id, document_title, revision_number,
+                        scope, section_id, heading, path, page_start, page_end,
+                        complete_section, text, matched_chunks, score,
+                        figures: [ {figure_id, caption, page, url} ]} ],
+            coverage: { vector, fulltext, reranked, reason } }
+       # Hybrid vector + full-text search, fused, reranked when a reranker is
+       # configured, then expanded to whole sections. text is the whole section
+       # when complete_section, else the matched chunks and their neighbours.
+       # coverage says which parts ran: without the docs embedder vector is false
+       # and reason says why; without the reranker reranked is false.
+
+GET  /v1/documents/{id}/sections/{section_id}    one whole section
+       -> { document_id, document_title, revision_number, section_id, heading,
+            path, level, page_start, page_end, text, figures:[...] }   | 404
+
+GET  /v1/documents/{id}/figures/{figure_id}      a figure image  -> image/png | 404
+
+POST /v1/documents/{id}/promote     copy a ready team document into the universe
+       # requires the key's promote capability
+       -> { status:"promoted", document_id, universe_document_id, seq }
+```
+All document reads require the key's read capability.
+
+### Skills
+Task instructions agents search for on each turn and load by name. Reads cover
+the team's skills and the universe's; a team skill hides a universe skill of the
+same name. Retired skills are not returned. A skill is a single SKILL.md of at
+most `skills.max_chars` characters; files it uses are named in `refs` and are not
+stored or served by KWIM.
+```
+GET  /v1/skills/search              skills that match the turn's request, best first
+       ?q=<text> &limit=5 (1..20) &agent=<persona tag> &tag=
+       -> { results: [ {name, description, tags, agents, scope:"team"|"universe",
+                        version, score, similarity, pending_revision} ],
+            coverage: { available, vector, fulltext, reason } }
+       # Names and descriptions only; load a body with GET /v1/skills/{name}.
+       # Ranked by similarity between the request and the whole skill; only
+       # skills at or above skills.search.min_similarity are returned. A
+       # request no skill answers can still return a near miss; the agent
+       # reads the skill and rejects it if it does not apply. With `agent`,
+       # skills whose agents list names only other personas are left out.
+       # Without the embedder, full-text ranking is used and coverage.reason
+       # says so.
+       # pending_revision: { proposal_id, proposed_at, proposed_by, summary } | null
+
+GET  /v1/skills                     every skill the team can load
+       ?agent= &tag=
+       -> { items: [ {name, description, tags, agents, scope, version} ] }
+
+GET  /v1/skills/{name}              the skill to follow
+       -> { name, description, agents, tags, scope, version, body, refs, owner,
+            updated_at, pending_revision }   | 404
+       # refs: "owner/repo:path" entries for the files the skill uses, in git.
+
+POST /v1/skills/propose          ->  propose a new skill or a revision; always reviewed
+       body: { text:<whole SKILL.md>, supersedes?:<name>, scope:"team"|"universe" }
+       # A new skill is proposed to the team; scope "universe" revises a
+       # universe skill and goes to the universe's review queue. Requires propose.
+       -> 202 { proposal_id, status:"pending_review", queue }
+       # 422 for a malformed SKILL.md, a credential in the text, or a revision
+       # whose name differs from supersedes; 409 for a new name that exists.
+
+POST /v1/skills/{name}/promote      copy the team's skill into the universe; requires promote
+       -> { status:"promoted", name, universe_version, seq }
+          | { status:"pending_review", proposal_id, detail }
+       # pending_review when the universe already has the name: an operator
+       # decides whether it becomes the universe skill's next version.
+```
+Skill proposals are reviewed like other proposals (`/v1/review`, Mattermost,
+the admin console); the review summary names the skill's owner.
+
 ### Proposals (status of any async write)
 ```
 GET  /v1/proposals/{id}             -> { id, object_type, status:"accepted"|"committed"

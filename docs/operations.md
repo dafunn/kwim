@@ -153,6 +153,85 @@ the name is also the KWIM team the repo distills into (so each repo gets its own
 non-default branch. Ensure the clone token can read the repo. Deploy, then run a one-off
 extraction to populate immediately.
 
+### Manage documents
+Operators upload documents (PDF or Markdown, up to `documents.max_upload_mb`) in the
+console's Documents tab, with the import CLI (see "Import documents and skills" below),
+or with `POST /v1/admin/teams/<team>/documents` (the request body is the file;
+`Content-Type` names its type). Each upload runs an ingest job, visible under
+`GET /v1/admin/jobs`: extraction, chunking, embedding and projection into
+`kwim_<team>_docs`. One ingest runs per team at a time.
+
+- The files live on the documents volume (`/data/documents` in kwim-service). Back it
+  up with Postgres: the document rows refer to the files by sha256.
+- Retract removes a document from search and keeps everything. Forget deletes the
+  document, its revisions, its log rows, and every file no other document uses
+  (preview first; the console asks for the title).
+- Promote copies a ready document into the universe, where every team can search it.
+  The team's copy is then hidden from that team's results.
+- Without `KWIM_DOCS_EMBEDDER_URL` search is full-text only; without
+  `KWIM_DOCS_RERANKER_URL` results keep their fused order.
+
+### Manage skills
+A skill is a SKILL.md: frontmatter (`name`, `description`, and optionally `agents`,
+`tags`, and `refs` naming files in git as `owner/repo:path`) and instructions. Agents
+search skills on every turn (`GET /v1/skills/search`) and load the one they follow
+(`GET /v1/skills/<name>`).
+
+A skill is a single file, at most `skills.max_chars` (8192) characters including its
+frontmatter. KWIM stores that text and nothing else: other files in a skill's directory,
+such as reference documents, scripts or templates, are not stored, and the import tool
+ignores them. Put what the skill needs in its body, or keep it in git and name it in
+`refs` or in the instructions. Skills made of several files are not supported in this
+release.
+
+- Operators write and revise skills in the console's Skills tab, or with
+  `POST /v1/admin/teams/<team>/skills` and `.../skills/<name>/revisions`. These commit
+  directly and are audited. Every version is kept; the Skills tab shows each version's
+  changes.
+- Agents propose new skills and revisions (`POST /v1/skills/propose`); they wait in the
+  review queue like other proposals, and the review message names the skill's owner.
+  An approved new skill is owned by the operator who approved it in the console;
+  approved elsewhere it has no owner, and the Skills tab lists it for one.
+- Retire hides a skill from agents and keeps it; restore brings it back.
+- Promote copies a team skill into the universe. When the universe already has the
+  name, a team key's promotion waits for an operator; an operator's promotion becomes
+  the universe skill's next version. A team skill hides a universe skill of the same
+  name from that team.
+- Every write is refused if the text holds something that looks like a credential;
+  refer to where the secret is kept instead.
+- Search ranks by similarity to the whole skill and returns only skills at or above
+  `skills.search.min_similarity` (`KWIM_SKILLS_SEARCH_MIN_SIMILARITY`). Raising it
+  returns fewer near misses and misses more real matches. Search uses the document
+  embedder; without `KWIM_DOCS_EMBEDDER_URL` it is full-text only and says so in
+  `coverage`.
+
+### Import documents and skills
+`python -m kwim_api.admin_import` uploads documents and adds skills through the admin
+API, as an operator, from any machine that can reach the service:
+
+```bash
+export KWIM_BASE_URL=https://kwim.example.com KWIM_ADMIN_USERNAME=<operator>
+python -m kwim_api.admin_import --team <team> documents manual.pdf notes.md --tags pumps
+python -m kwim_api.admin_import --team <team> skills skills/ --owner <operator>
+```
+
+- The password comes from `KWIM_ADMIN_PASSWORD`, or the tool asks for it.
+- `documents` takes PDF and Markdown files. `--title` (one file only; the default is the
+  file name), `--tags` and `--label` match the upload route's parameters. Each upload
+  waits for its ingest job (`--job-timeout`, default 1800 seconds).
+- `skills` takes SKILL.md files, directories holding one, or directories whose
+  subdirectories hold one each. It reads only each `SKILL.md`; other files in a skill's
+  directory are ignored (see "Manage skills"). Each skill is checked before it is sent,
+  including the credential check.
+- A document whose title already exists, or a skill whose name does, is reported with
+  its current revision or version and whether the new file is identical, and the tool
+  asks before uploading a new revision. `--confirm-new-revision` answers yes for every
+  item; without it and without a terminal, an existing item fails.
+- `--ca-file` names the CA for the service's certificate; `--insecure` skips
+  verification.
+- Uploads and skill writes are audited like the console's. The exit status is 0 when
+  every item was imported or declined.
+
 ### Tune a configuration value
 Non-secret tunables (gate thresholds, decay half-lives, retrieval/warm-start sizes, the
 code-graph resolution cascade and discovery scope) resolve as env var -> `KWIM_CONFIG`
@@ -243,6 +322,36 @@ opposite default (`admin.allow_team_create`, `KWIM_ADMIN_ALLOW_TEAM_CREATE`, def
 `python -m kwim_api.rebuild` replays `commit_log` to reconstruct a team's `kwim_<team>` graph.
 The code graph is separate (`kwim_<team>_code`) so a rebuild never wipes it; it's
 regenerated by the extractor, not the log.
+
+The rebuild replays the log as of when it starts into `kwim_<team>_rebuild`, checks it,
+and swaps it in with `GRAPH.COPY`; then it replays the rows committed in the meantime
+into the live graph. The swap backs the live graph up to `kwim_<team>_prerebuild`, and
+if the copy fails it restores it and fails, keeping the rebuilt graph for another try.
+Without `GRAPH.COPY` it clears and replays the live graph instead. A temp graph left by
+an unfinished rebuild is dropped when the next one starts.
+
+Through the admin API (`POST /v1/admin/teams/{team}/rebuild`) a team can keep taking
+writes: the swap holds a per-team lock that every kwim-service query on the live graph
+waits on (reads too: a FalkorDB query on a missing graph creates it), so none lands
+between its delete and copy; queries wait for the swap, which takes as long as the
+copy. The lock is per process, so this holds for one kwim-service replica, and not for
+the CLI, which runs as its own process: stop writes to the team (or scale kwim-service
+to zero) before `python -m kwim_api.rebuild`. An admin rebuild job is cancelled and
+marked failed after `rebuild.timeout_s` (`KWIM_REBUILD_TIMEOUT_S`, default 1800).
+
+Documents are separate too. `python -m kwim_api.documents.rebuild --team <team>` (or
+`--all-teams`) re-projects every ready document from the extractions stored in Postgres
+into `kwim_<team>_docs_rebuild`; it does not read the files. It then swaps that graph in
+with `GRAPH.COPY`, backing the live graph up to `kwim_<team>_docs_prerebuild` and
+restoring it if the copy fails, and re-projects documents uploaded, revised, promoted,
+retracted or forgotten while it ran. If any document fails to project, the live graph
+is left as it was and the command exits non-zero. Without `GRAPH.COPY` it rebuilds the
+live graph in place, and search for that team returns nothing until it finishes. The
+swap's lock is per process, so it does not stop kwim-service's queries: a search that
+lands between the swap's delete and copy recreates the live graph, the copy fails, the
+backup is restored and the command reports the graph as not swapped. Run it again, or
+when the team is quiet. Run it after changing the document embedding
+model or `documents.embedder.dim`.
 
 ## Observability
 

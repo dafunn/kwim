@@ -5,9 +5,11 @@ One graph per team (`kwim_<team>`), whose indexes this store creates on first
 use; `kwim_universe` is reached as the pseudo-team "universe". Working memory is
 Redis TTL keys on the same instance.
 """
+import asyncio
 import json as _json
 import logging
 import re
+import weakref
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ from falkordb.asyncio import FalkorDB
 from ..config import settings
 from ..freshness import resolve_decay_class
 from .falkor_code import CodeGraphStore, _code_graph_name
+from .falkor_docs import DocsGraphReads, DocsGraphStore, _docs_graph_name
 
 _IDENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -30,6 +33,37 @@ def _graph_name(team: str) -> str:
     if not _IDENT.match(team):
         raise ValueError(f"unsafe team identifier: {team!r}")
     return f"kwim_{team}"
+
+
+# One lock per team, shared by every FalkorStore in this process. Every query on
+# a team's live graph holds it, reads included: in FalkorDB a GRAPH.QUERY on a
+# missing key creates the graph, so any query between a rebuild's delete of the
+# live graph and its copy would recreate it and fail the copy. The swap holds it
+# for its delete and copy. Queries on other graphs (a rebuild's temp graph) do
+# not take it. Per process: the rebuild CLI, a separate process, needs the team
+# quiet instead.
+# Keyed by event loop as well: an asyncio.Lock belongs to the loop it first ran on.
+_LIVE_GRAPH_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]" = \
+    weakref.WeakKeyDictionary()
+
+
+def live_graph_lock(team: str) -> asyncio.Lock:
+    locks = _LIVE_GRAPH_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    return locks.setdefault(team, asyncio.Lock())
+
+
+class _LockedGraph:
+    """A team's live graph whose queries run under its lock."""
+
+    def __init__(self, graph, lock: asyncio.Lock):
+        self._graph, self._lock = graph, lock
+
+    async def query(self, *args, **kwargs):
+        async with self._lock:
+            return await self._graph.query(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._graph, name)
 
 
 # :Fact read projection shared by query_facts and search_facts, whose rows
@@ -75,7 +109,7 @@ _INIT_CYPHER = [
 ]
 
 
-class FalkorStore(CodeGraphStore):
+class FalkorStore(CodeGraphStore, DocsGraphStore, DocsGraphReads):
     def __init__(self) -> None:
         self._db: FalkorDB | None = None
         self._inited: set[str] = set()
@@ -117,6 +151,11 @@ class FalkorStore(CodeGraphStore):
         """
         name = graph_name or _graph_name(team)
         g = self._db.select_graph(name)
+        if name == _graph_name(team):
+            lock = live_graph_lock(team)
+            async with lock:
+                await self._ensure_schema(g, name, _INIT_CYPHER)
+            return _LockedGraph(g, lock)
         await self._ensure_schema(g, name, _INIT_CYPHER)
         return g
 
@@ -128,17 +167,28 @@ class FalkorStore(CodeGraphStore):
         await self._graph(team)
 
     async def drop_team_graphs(self, team: str) -> dict[str, bool]:
-        """Destructive (team destroy only): delete kwim_<team> and
-        kwim_<team>_code; either may already be absent. Clears both from the _inited
-        cache so a re-provisioned team gets its indexes again.
+        """Destructive (team destroy only): delete kwim_<team>, kwim_<team>_code
+        and kwim_<team>_docs; any may already be absent. Clears them from the
+        _inited cache so a re-provisioned team gets its indexes again.
         """
         results: dict[str, bool] = {}
-        for name in (_graph_name(team), _code_graph_name(team)):
+        # A team that never indexed code or uploaded a document has no _code or
+        # _docs graph, and FalkorDB answers GRAPH.DELETE on a missing graph with
+        # "Invalid graph operation on empty key", so only graphs that exist are
+        # deleted.
+        existing = {g.decode() if isinstance(g, bytes) else str(g)
+                    for g in await self._db.connection.execute_command("GRAPH.LIST")}
+        for name in (_graph_name(team), _code_graph_name(team), _docs_graph_name(team)):
             try:
+                if name not in existing:
+                    results[name] = False
+                    continue
                 await self._db.select_graph(name).delete()
                 results[name] = True
             except Exception as exc:
-                if "not exist" in str(exc).lower() or "unknown graph" in str(exc).lower():
+                msg = str(exc).lower()
+                # Deleted between the list and here.
+                if "not exist" in msg or "unknown graph" in msg or "empty key" in msg:
                     results[name] = False
                 else:
                     raise

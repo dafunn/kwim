@@ -27,6 +27,9 @@ _VALID_DECAY_CLASSES = {"permanent", "slow", "fast"}
 WATERMARK_EVENT_TYPE = "distiller_watermark"
 DISTILLER_AGENT_ID = "distiller"
 WINDOW_LIMIT = int(os.environ.get("DISTILLER_WINDOW_LIMIT", "500"))
+# A fact must cite at least this many distinct events. For an agent that records
+# one event per turn, this is a count of turns.
+MIN_FACT_TURNS = int(os.environ.get("DISTILLER_MIN_FACT_TURNS", "2"))
 
 _SYSTEM_PROMPT = """You are the KWIM distiller. You are given a window of episodic
 events (agent traces) from a single team and must extract durable, cross-episode
@@ -71,6 +74,8 @@ Rules:
 - Cross-episode, not per-episode. Propose something only when multiple episodes
   support it, or one episode supports it very strongly - and always cite the
   supporting events by their integer "ref" number in "evidence".
+- A fact must cite at least {min_fact_turns} different events in "evidence"; a fact
+  citing fewer is discarded.
 - Propose, don't decide. You are proposing candidates to a governed gate; a
   duplicate or contradiction will be screened or sent to a human. Prefer
   precision - a wrong durable rule is costly.
@@ -185,6 +190,10 @@ def _validate_candidate(item: object, ref_to_id: dict[int, str]) -> dict | None:
             decay_class = None
         raw_about = item.get("about")
         about = [a for a in raw_about if isinstance(a, str) and a] if isinstance(raw_about, list) else []
+        if len(evidence) < MIN_FACT_TURNS:
+            log.warning("distiller: dropping fact citing %d event(s), fewer than %d: %r",
+                        len(evidence), MIN_FACT_TURNS, item)
+            return None
         return {"kind": "fact", "statement": statement, "fact_type": fact_type,
                 "evidence": evidence, "decay_class": decay_class, "about": about}
 
@@ -234,7 +243,7 @@ async def _distill(events: list[dict]) -> list[dict] | None:
     human = f"{formatted}\n\n{recalled}" if recalled else formatted
     try:
         response = await llm.ainvoke([
-            SystemMessage(content=_SYSTEM_PROMPT),
+            SystemMessage(content=_SYSTEM_PROMPT.replace("{min_fact_turns}", str(MIN_FACT_TURNS))),
             HumanMessage(content=human),
         ])
         content = response.content if isinstance(response.content, str) else str(response.content)

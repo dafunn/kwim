@@ -15,6 +15,7 @@ from pydantic import Field
 
 from .. import rebuild as rebuild_mod
 from ..admin_auth import AdminContext, CurrentOperator
+from ..config import settings
 from ..embedder import Embedder
 from ..forget import execute_forget, plan_forget, preflight
 from ..models import (
@@ -548,11 +549,22 @@ async def _run_rebuild(job_id: str, team: str, skip_semantic: bool,
     try:
         await pg.connect()
         await falkor.connect()
-        ok = await rebuild_mod.rebuild_team(
-            team, pg, falkor, embedder, in_place, yes=True)
+        ok = await asyncio.wait_for(
+            rebuild_mod.rebuild_team(team, pg, falkor, embedder, in_place, yes=True),
+            timeout=settings.rebuild_timeout_s)
         await State.admin.finish_job(
             job_id, "succeeded" if ok else "failed",
             detail={"rebuild_ok": ok})
+    except TimeoutError:
+        # Cancelled; a later rebuild drops the half-built temp graph first.
+        log.error("rebuild job %s (team=%s) timed out after %ss", job_id, team,
+                  settings.rebuild_timeout_s)
+        try:
+            await State.admin.finish_job(
+                job_id, "failed",
+                detail={"error": f"timed out after {settings.rebuild_timeout_s:g}s"})
+        except Exception:
+            log.warning("could not mark job %s as failed", job_id, exc_info=True)
     except Exception as exc:
         log.exception("rebuild job %s (team=%s) failed", job_id, team)
         try:
